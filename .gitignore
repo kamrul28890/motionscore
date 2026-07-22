@@ -12,6 +12,9 @@ coverage/
 tmp/
 *.log
 
+# Python virtual environment
+.venv/
+
 # Editor / OS
 .DS_Store
 Thumbs.db

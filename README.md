@@ -1,6 +1,6 @@
 # MotionScore
 
-A CLI-based music-to-physics video generator. Feed it a MIDI file (or audio, with Basic Pitch installed) and it produces an H.264 MP4 where a ball moves under realistic gravity, striking targets in exact sync with every note.
+A music-to-physics video generator. Feed it a MIDI file (or audio, with Basic Pitch installed) and it produces an H.264 MP4 where a ball moves under realistic gravity, striking targets in exact sync with every note. Available as both a CLI tool and a web application.
 
 ## Quick Start
 
@@ -11,18 +11,53 @@ npm install
 # Build all packages
 npm run build
 
-# Run on a MIDI file
+# --- Option A: CLI ---
 npx motionscore song.mid -o output.mp4
 
-# Run with custom settings
-npx motionscore song.mid -o output.mp4 --fps 30 --width 1280 --height 720 --verbose
+# --- Option B: Web UI ---
+npm run web:build
+npm run web:start
+# Open http://localhost:3001
 ```
+
+## Web Interface
+
+A browser-based UI that exposes all the same features as the CLI — upload a file, configure settings, watch real-time progress, then preview and download the video.
+
+```bash
+# Development mode (hot-reload)
+npm run web:dev
+
+# Production mode
+npm run web:build    # Build React frontend + Express server
+npm run web:start    # Start on http://localhost:3001
+```
+
+### Features
+
+- **Drag-and-drop file upload** — accepts .mid, .midi, .wav, .mp3, .flac, .ogg
+- **Full configuration** — FPS, resolution, layout strategy, with quick presets (1080p/720p/4K)
+- **Real-time progress** — animated progress bar, current stage, scrolling log, elapsed timer (via Server-Sent Events)
+- **Video preview** — in-browser HTML5 player with standard controls
+- **Download** — one-click download of the generated MP4
+- **Stats display** — total notes, rendered frames, duration, max sync error
+
+### API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/generate` | Upload file + config (multipart form), returns `{ jobId }` |
+| GET | `/api/progress/:jobId` | SSE stream of pipeline progress events |
+| GET | `/api/video/:jobId` | Serve the generated MP4 (inline) |
+| GET | `/api/video/:jobId/download` | Serve with attachment header for download |
+
+The server cleans up temporary files (uploads + outputs) after 30 minutes.
 
 ## Requirements
 
 - **Node.js** >= 22.12 (tested on Node 26)
-- **ffmpeg** on PATH ([download](https://ffmpeg.org/download.html)) - required for video export
-- **Python 3 + Basic Pitch** (optional) - only needed for audio input (`.wav`/`.mp3`/`.flac`/`.ogg`)
+- **ffmpeg** on PATH ([download](https://ffmpeg.org/download.html)) — required for video export
+- **Python 3 + Basic Pitch** (optional) — only needed for audio input (`.wav`/`.mp3`/`.flac`/`.ogg`)
 
 ```bash
 # Install Basic Pitch for audio support (optional)
@@ -92,6 +127,7 @@ packages/
   renderer/           Stage E: headless PNG frame rendering (@napi-rs/canvas)
   video-export/       Stage F: ffmpeg H.264 muxing (fluent-ffmpeg)
   cli/                CLI entry point wiring all stages together
+  web/                Web UI: Express API server + React frontend (Vite)
 ```
 
 ## Pipeline Overview
@@ -147,6 +183,11 @@ npm run clean        # Remove all dist/ output
 npm test             # Run all tests (vitest)
 npm run test:watch   # Run tests in watch mode
 npm start -- <args>  # Run the CLI (equivalent to npx motionscore <args>)
+
+# Web interface
+npm run web:dev      # Dev mode with hot-reload (frontend + backend)
+npm run web:build    # Build React frontend + Express server for production
+npm run web:start    # Start production server on port 3001
 ```
 
 ### Running Tests
