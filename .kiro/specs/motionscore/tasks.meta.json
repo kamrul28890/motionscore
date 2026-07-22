@@ -1,0 +1,143 @@
+{
+  "pbtResults": {},
+  "executionHistory": {
+    "1.1 Initialize monorepo with TypeScript project structure": [
+      {
+        "executionId": "6c918037-2218-4ca2-b82c-112ff123f4fc",
+        "chatSessionId": "sess_968399c7-6976-4c81-9767-64c487f68a75",
+        "timestamp": 1784716208884
+      },
+      {
+        "executionId": "6c918037-2218-4ca2-b82c-112ff123f4fc",
+        "chatSessionId": "sess_968399c7-6976-4c81-9767-64c487f68a75",
+        "timestamp": 1784716220438
+      }
+    ],
+    "1.2 Define shared data contract interfaces (`packages/types`)": [
+      {
+        "executionId": "6c918037-2218-4ca2-b82c-112ff123f4fc",
+        "chatSessionId": "sess_968399c7-6976-4c81-9767-64c487f68a75",
+        "timestamp": 1784716209254
+      }
+    ],
+    "1.3 Implement data contract validators (`packages/types/validators`)": [
+      {
+        "executionId": "6c918037-2218-4ca2-b82c-112ff123f4fc",
+        "chatSessionId": "sess_968399c7-6976-4c81-9767-64c487f68a75",
+        "timestamp": 1784716209350
+      }
+    ],
+    "2.1 Implement MIDI parser (`packages/note-extractor`)": [
+      {
+        "executionId": "6c918037-2218-4ca2-b82c-112ff123f4fc",
+        "chatSessionId": "sess_968399c7-6976-4c81-9767-64c487f68a75",
+        "timestamp": 1784716209408
+      }
+    ],
+    "3.1 Implement pitch-to-position mapping (`packages/musical-mapper`)": [
+      {
+        "executionId": "6c918037-2218-4ca2-b82c-112ff123f4fc",
+        "chatSessionId": "sess_968399c7-6976-4c81-9767-64c487f68a75",
+        "timestamp": 1784716209482
+      }
+    ],
+    "3.2 Implement full musical mapper with note filtering": [
+      {
+        "executionId": "6c918037-2218-4ca2-b82c-112ff123f4fc",
+        "chatSessionId": "sess_968399c7-6976-4c81-9767-64c487f68a75",
+        "timestamp": 1784716209542
+      }
+    ],
+    "4. Checkpoint - Core data pipeline": [
+      {
+        "executionId": "6c918037-2218-4ca2-b82c-112ff123f4fc",
+        "chatSessionId": "sess_968399c7-6976-4c81-9767-64c487f68a75",
+        "timestamp": 1784716209617
+      }
+    ],
+    "5.1 Implement ballistic arc calculator": [
+      {
+        "executionId": "6c918037-2218-4ca2-b82c-112ff123f4fc",
+        "chatSessionId": "sess_968399c7-6976-4c81-9767-64c487f68a75",
+        "timestamp": 1784716209690
+      }
+    ],
+    "5.3 Implement trajectory chaining solver": [
+      {
+        "executionId": "6c918037-2218-4ca2-b82c-112ff123f4fc",
+        "chatSessionId": "sess_968399c7-6976-4c81-9767-64c487f68a75",
+        "timestamp": 1784716209785
+      }
+    ],
+    "6. Checkpoint - Solver correctness": [
+      {
+        "executionId": "6c918037-2218-4ca2-b82c-112ff123f4fc",
+        "chatSessionId": "sess_968399c7-6976-4c81-9767-64c487f68a75",
+        "timestamp": 1784716209936
+      }
+    ],
+    "7.1 Implement frame renderer (`packages/renderer`)": [
+      {
+        "executionId": "6c918037-2218-4ca2-b82c-112ff123f4fc",
+        "chatSessionId": "sess_968399c7-6976-4c81-9767-64c487f68a75",
+        "timestamp": 1784716210052
+      }
+    ],
+    "8.1 Implement ffmpeg video exporter (`packages/video-export`)": [
+      {
+        "executionId": "6c918037-2218-4ca2-b82c-112ff123f4fc",
+        "chatSessionId": "sess_968399c7-6976-4c81-9767-64c487f68a75",
+        "timestamp": 1784716210106
+      }
+    ],
+    "9.1 Implement CLI argument parser (`packages/cli`)": [
+      {
+        "executionId": "6c918037-2218-4ca2-b82c-112ff123f4fc",
+        "chatSessionId": "sess_968399c7-6976-4c81-9767-64c487f68a75",
+        "timestamp": 1784716210170
+      }
+    ],
+    "9.2 Wire complete pipeline in CLI main function": [
+      {
+        "executionId": "6c918037-2218-4ca2-b82c-112ff123f4fc",
+        "chatSessionId": "sess_968399c7-6976-4c81-9767-64c487f68a75",
+        "timestamp": 1784716210223
+      }
+    ],
+    "9.3 Add npm bin script and build configuration": [
+      {
+        "executionId": "6c918037-2218-4ca2-b82c-112ff123f4fc",
+        "chatSessionId": "sess_968399c7-6976-4c81-9767-64c487f68a75",
+        "timestamp": 1784716210288
+      }
+    ],
+    "10. Checkpoint - End-to-end M1": [
+      {
+        "executionId": "6c918037-2218-4ca2-b82c-112ff123f4fc",
+        "chatSessionId": "sess_968399c7-6976-4c81-9767-64c487f68a75",
+        "timestamp": 1784716210368
+      }
+    ],
+    "11.1 Implement Basic Pitch subprocess wrapper": [
+      {
+        "executionId": "6c918037-2218-4ca2-b82c-112ff123f4fc",
+        "chatSessionId": "sess_968399c7-6976-4c81-9767-64c487f68a75",
+        "timestamp": 1784716210422
+      }
+    ],
+    "11.2 Wire audio transcription into note extractor": [
+      {
+        "executionId": "6c918037-2218-4ca2-b82c-112ff123f4fc",
+        "chatSessionId": "sess_968399c7-6976-4c81-9767-64c487f68a75",
+        "timestamp": 1784716210485
+      }
+    ],
+    "12. Final checkpoint - M1 + M2 complete": [
+      {
+        "executionId": "6c918037-2218-4ca2-b82c-112ff123f4fc",
+        "chatSessionId": "sess_968399c7-6976-4c81-9767-64c487f68a75",
+        "timestamp": 1784716210539
+      }
+    ]
+  }
+}
