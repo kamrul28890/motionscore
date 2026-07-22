@@ -8,7 +8,7 @@
 
 import { createServer } from 'node:http';
 import { existsSync, mkdirSync, rmSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
@@ -19,6 +19,31 @@ import { nanoid } from 'nanoid';
 
 import { runPipeline, detectInputType, type ParsedArgs } from '@motionscore/cli';
 import type { CLIOptions } from '@motionscore/types';
+
+// ---------------------------------------------------------------------------
+// Auto-detect venv Python for Basic Pitch transcription
+// ---------------------------------------------------------------------------
+// If PYTHON is not already set, look for the project's .venv and use it.
+// This means the server "just works" for audio input after running the setup
+// script — no manual env var needed.
+
+const __filename = fileURLToPath(import.meta.url);
+const __serverDir = fileURLToPath(new URL('.', import.meta.url));
+// Project root is two levels up from packages/web/src/ (or packages/web/dist/)
+const PROJECT_ROOT = resolve(__serverDir, '..', '..', '..');
+
+if (!process.env.PYTHON) {
+  // Windows: .venv/Scripts/python.exe  |  POSIX: .venv/bin/python
+  const candidates = [
+    join(PROJECT_ROOT, '.venv', 'Scripts', 'python.exe'),
+    join(PROJECT_ROOT, '.venv', 'bin', 'python'),
+  ];
+  const found = candidates.find((p) => existsSync(p));
+  if (found) {
+    process.env.PYTHON = found;
+    console.log(`[motionscore-web] Auto-detected venv Python: ${found}`);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Types

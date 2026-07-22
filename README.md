@@ -33,6 +33,19 @@ npm run web:build    # Build React frontend + Express server
 npm run web:start    # Start on http://localhost:3001
 ```
 
+To enable audio input on the web server, set `PYTHON` before starting:
+
+```powershell
+# Windows (PowerShell)
+$env:PYTHON = "$PWD\.venv\Scripts\python.exe"
+npm run web:start
+```
+
+```bash
+# macOS / Linux
+PYTHON=.venv/bin/python npm run web:start
+```
+
 ### Features
 
 - **Drag-and-drop file upload** — accepts .mid, .midi, .wav, .mp3, .flac, .ogg
@@ -59,9 +72,45 @@ The server cleans up temporary files (uploads + outputs) after 30 minutes.
 - **ffmpeg** on PATH ([download](https://ffmpeg.org/download.html)) — required for video export
 - **Python 3 + Basic Pitch** (optional) — only needed for audio input (`.wav`/`.mp3`/`.flac`/`.ogg`)
 
+### Setting up Basic Pitch (audio support)
+
+Basic Pitch has specific dependency constraints, so it's installed in a virtual environment. A setup script handles everything:
+
+```powershell
+# Windows (PowerShell)
+.\scripts\setup-basic-pitch.ps1
+```
+
 ```bash
-# Install Basic Pitch for audio support (optional)
-pip install basic-pitch
+# macOS / Linux
+./scripts/setup-basic-pitch.sh
+```
+
+This creates a `.venv/` in the project root with Basic Pitch and its dependencies. After setup, point the `PYTHON` environment variable at the venv's Python executable so the transcription subprocess uses it:
+
+```powershell
+# Windows — set before running
+$env:PYTHON = "C:\path\to\visualizer\.venv\Scripts\python.exe"
+```
+
+```bash
+# macOS / Linux
+export PYTHON="$(pwd)/.venv/bin/python"
+```
+
+Or add a `.env` file at the project root:
+
+```
+PYTHON=.venv/Scripts/python.exe
+```
+
+**What the setup script installs (if you prefer manual):**
+
+```bash
+python -m venv .venv
+.venv/Scripts/python -m pip install --upgrade pip "setuptools<71" wheel
+.venv/Scripts/pip install "basic-pitch[onnx]==0.4.0" --no-deps
+.venv/Scripts/pip install librosa mir-eval numpy pretty-midi "resampy<0.4.3" scikit-learn scipy typing-extensions onnxruntime
 ```
 
 ## CLI Usage
@@ -128,6 +177,9 @@ packages/
   video-export/       Stage F: ffmpeg H.264 muxing (fluent-ffmpeg)
   cli/                CLI entry point wiring all stages together
   web/                Web UI: Express API server + React frontend (Vite)
+scripts/
+  setup-basic-pitch.ps1   Setup script for Windows (PowerShell)
+  setup-basic-pitch.sh    Setup script for macOS/Linux
 ```
 
 ## Pipeline Overview
@@ -355,14 +407,36 @@ Or set `FFMPEG_PATH` to the ffmpeg binary location.
 
 ### Audio input fails with "Basic Pitch exited with code 1"
 
-Install the Basic Pitch Python package:
-```bash
-pip install basic-pitch
+Run the setup script to install Basic Pitch in a virtual environment:
+
+```powershell
+# Windows
+.\scripts\setup-basic-pitch.ps1
 ```
 
-If Python is installed under a different name (e.g., `python3`), set the `PYTHON` environment variable:
 ```bash
-PYTHON=python3 npx motionscore song.wav -o out.mp4
+# macOS / Linux
+./scripts/setup-basic-pitch.sh
+```
+
+Then set the `PYTHON` env var to point at the venv:
+
+```powershell
+# Windows (PowerShell)
+$env:PYTHON = "$PWD\.venv\Scripts\python.exe"
+npx motionscore song.wav -o out.mp4
+```
+
+```bash
+# macOS / Linux
+PYTHON=.venv/bin/python npx motionscore song.wav -o out.mp4
+```
+
+For the web server, set `PYTHON` before starting:
+
+```powershell
+$env:PYTHON = "$PWD\.venv\Scripts\python.exe"
+npm run web:start
 ```
 
 ### `@tonejs/midi` import errors

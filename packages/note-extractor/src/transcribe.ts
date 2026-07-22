@@ -1,20 +1,21 @@
 // @motionscore/note-extractor — audio transcription (task 11.1)
 //
 // M2 audio input: transcribe an audio file to MIDI by invoking Spotify's
-// Basic Pitch as a Python subprocess. This module implements ONLY the
-// subprocess wrapper. Routing audio inputs through this wrapper and then
-// through `parseMidi` (plus temp-file cleanup) is task 11.2.
+// Basic Pitch as a subprocess. This module implements ONLY the subprocess
+// wrapper. Routing audio inputs through this wrapper and then through
+// `parseMidi` (plus temp-file cleanup) is task 11.2.
 
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { TranscriptionError } from '@motionscore/types';
 
 /**
- * Environment variable that overrides the Python executable used to launch
- * Basic Pitch. Defaults to `python`. Useful for virtualenvs or systems where
- * Python 3 is exposed as `python3` / the Windows `py` launcher.
+ * Environment variable that overrides the Python executable used to locate
+ * Basic Pitch. When set (e.g. to a venv Python), the `basic-pitch` console
+ * script is resolved from the same directory. Defaults to `python`.
  */
 const PYTHON_ENV_VAR = 'PYTHON';
 
@@ -85,17 +86,51 @@ export async function transcribeAudio(audioPath: string): Promise<string> {
 }
 
 /**
- * Spawn `python -m basic_pitch <outputDir> <audioPath>` and resolve once it
- * exits 0. Rejects with a `TranscriptionError` if the process cannot be started
- * (e.g. Python missing → `ENOENT`) or exits with a non-zero code, attaching the
- * captured stderr for diagnostics.
+ * Resolve the `basic-pitch` executable. Strategy:
+ * 1. If PYTHON points to a venv Python, look for `basic-pitch` (or
+ *    `basic-pitch.exe` on Windows) in the same Scripts/bin directory.
+ * 2. Otherwise fall back to `python -m basic_pitch` (works when basic-pitch
+ *    has a __main__.py, e.g. newer versions).
+ *
+ * Returns { exe, args } where `exe` is the binary to spawn and `args` is the
+ * prefix arguments before `<outputDir> <audioPath>`.
+ */
+function resolveBasicPitchCommand(python: string): { exe: string; args: string[] } {
+  const pythonDir = dirname(python);
+
+  // Look for the console script next to the Python executable
+  const candidates = [
+    join(pythonDir, 'basic-pitch.exe'),
+    join(pythonDir, 'basic-pitch'),
+  ];
+  const script = candidates.find((p) => existsSync(p));
+  if (script) {
+    return { exe: script, args: [] };
+  }
+
+  // Fallback: python -m basic_pitch (for system installs or newer versions)
+  return { exe: python, args: ['-m', 'basic_pitch'] };
+}
+
+/**
+ * Spawn the Basic Pitch CLI and resolve once it exits 0. Rejects with a
+ * `TranscriptionError` if the process cannot be started (e.g. executable
+ * missing → `ENOENT`) or exits with a non-zero code, attaching the captured
+ * stderr for diagnostics.
  */
 function runBasicPitch(python: string, outputDir: string, audioPath: string): Promise<void> {
+  const { exe, args } = resolveBasicPitchCommand(python);
+  const fullArgs = [...args, outputDir, audioPath];
+
   return new Promise<void>((resolve, reject) => {
     // Argument array + shell:false → each path is a single argv entry and is
     // never parsed by a shell, preventing command injection via file paths.
-    const child = spawn(python, ['-m', 'basic_pitch', outputDir, audioPath], {
+    // PYTHONIOENCODING=utf-8 prevents UnicodeEncodeError on Windows when
+    // Basic Pitch prints emoji/sparkle characters to stdout (cp1252 can't
+    // encode them; utf-8 can).
+    const child = spawn(exe, fullArgs, {
       shell: false,
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
     });
 
     let stdout = '';
@@ -112,7 +147,7 @@ function runBasicPitch(python: string, outputDir: string, audioPath: string): Pr
       if (code === 'ENOENT') {
         reject(
           new TranscriptionError(
-            `Python executable "${python}" was not found. ${INSTALL_INSTRUCTIONS}`,
+            `Basic Pitch executable not found (tried "${exe}"). ${INSTALL_INSTRUCTIONS}`,
             { cause },
           ),
         );
@@ -120,7 +155,7 @@ function runBasicPitch(python: string, outputDir: string, audioPath: string): Pr
       }
       reject(
         new TranscriptionError(
-          `Failed to start the Basic Pitch subprocess ("${python}"): ${cause.message}. ${INSTALL_INSTRUCTIONS}`,
+          `Failed to start the Basic Pitch subprocess ("${exe}"): ${cause.message}. ${INSTALL_INSTRUCTIONS}`,
           { cause },
         ),
       );
