@@ -40,6 +40,47 @@ const DEFAULT_VIDEO_CODEC = 'libx264';
 /** Default constant-rate-factor quality, matching Stage F (Req 6.3). */
 const DEFAULT_CRF = 18;
 
+/** GPU encoders recognized by the quality/preset logic. */
+const GPU_ENCODERS = new Set(['h264_nvenc', 'h264_amf', 'h264_qsv']);
+
+/** Build encoder-specific output options (mirrors video-export logic). */
+function buildEncoderOptions(config: VideoOnlyExportConfig): string[] {
+  const codec = config.codec ?? DEFAULT_VIDEO_CODEC;
+  const quality = config.quality ?? DEFAULT_CRF;
+  const gpuDevice = config.gpuDevice ?? 0;
+
+  const opts: string[] = ['-pix_fmt', 'yuv420p'];
+
+  if (codec === 'h264_nvenc') {
+    opts.push('-rc', 'constqp', '-cq', String(quality));
+    opts.push('-preset', config.preset ?? 'p4');
+    opts.push('-gpu', String(gpuDevice));
+  } else if (codec === 'h264_amf') {
+    opts.push('-rc', 'cqp', '-qp_i', String(quality), '-qp_p', String(quality));
+    opts.push('-quality', config.preset ?? 'balanced');
+    if (gpuDevice > 0) {
+      opts.push('-gpu', String(gpuDevice));
+    }
+  } else if (codec === 'h264_qsv') {
+    opts.push('-global_quality', String(quality));
+    if (config.preset) {
+      opts.push('-preset', config.preset);
+    }
+  } else {
+    opts.push('-crf', String(quality));
+    if (config.preset) {
+      opts.push('-preset', config.preset);
+    }
+  }
+
+  return opts;
+}
+
+/** Build hwaccel input options — not needed for PNG image sequences. */
+function buildHwaccelInputOptions(_config: VideoOnlyExportConfig): string[] {
+  return [];
+}
+
 /** Actionable guidance surfaced when ffmpeg is unavailable (Req 6.2). */
 export const FFMPEG_INSTALL_HINT =
   'Install ffmpeg from https://ffmpeg.org/download.html and ensure it is on your PATH ' +
@@ -58,10 +99,14 @@ export interface VideoOnlyExportConfig {
   outputPath: string;
   /** Frame rate of the input frame sequence. */
   fps: number;
-  /** Video codec (default: `'libx264'`). */
+  /** Video codec (default: `'libx264'`). GPU options: h264_nvenc, h264_amf, h264_qsv. */
   codec?: string;
   /** H.264 CRF quality value (default: 18). */
   quality?: number;
+  /** GPU device index for hardware-accelerated encoding (default: 0). */
+  gpuDevice?: number;
+  /** Quality preset (encoder-specific). */
+  preset?: string;
 }
 
 /**
@@ -128,20 +173,20 @@ export async function exportVideoOnly(
   await assertFfmpegAvailable();
 
   const videoCodec = config.codec ?? DEFAULT_VIDEO_CODEC;
-  const crf = config.quality ?? DEFAULT_CRF;
   const framesInput = join(config.frameDir, config.framePattern);
   const fps = String(config.fps);
+  const encoderOpts = buildEncoderOptions(config);
+  const hwaccelOpts = buildHwaccelInputOptions(config);
 
   return new Promise<string>((resolveExport, rejectExport) => {
     ffmpeg()
       // Sole input: the numbered PNG frames, read as an image sequence at `fps`.
       .input(framesInput)
-      .inputOptions(['-framerate', fps, '-start_number', '1'])
+      .inputOptions([...hwaccelOpts, '-framerate', fps, '-start_number', '1'])
       .videoCodec(videoCodec)
       .outputOptions([
         '-map', '0:v:0', // video from the frame sequence
-        '-crf', String(crf),
-        '-pix_fmt', 'yuv420p',
+        ...encoderOpts,
         '-r', fps,
       ])
       .noAudio()

@@ -24,6 +24,17 @@ export interface CLIOptions {
   layout?: 'piano-keys' | 'lanes';
   /** When true, print per-stage progress information. */
   verbose?: boolean;
+  /**
+   * Video encoder codec (default: 'libx264').
+   * GPU options: 'h264_nvenc' (NVIDIA), 'h264_amf' (AMD), 'h264_qsv' (Intel).
+   */
+  codec?: string;
+  /** GPU device index for hardware encoding (default: 0). Use 1 for external GPU. */
+  gpuDevice?: number;
+  /** Encoder quality preset (encoder-specific). */
+  preset?: string;
+  /** Number of frames to render in parallel (default: 4). */
+  parallelFrames?: number;
 }
 
 /**
@@ -117,6 +128,12 @@ export interface RenderConfig {
   particlesOnImpact?: boolean;
   /** Directory to write frame PNGs into. */
   outputDir: string;
+  /**
+   * Number of frames to render in parallel (default: 1, sequential).
+   * Higher values use more CPU cores for frame rendering. Recommended: 4-8
+   * for modern multi-core CPUs. Has no effect on GPU encoding (that's Stage F).
+   */
+  parallelFrames?: number;
 }
 
 /**
@@ -133,8 +150,30 @@ export interface ExportConfig {
   outputPath: string;
   /** Frame rate of the input frame sequence. */
   fps: number;
-  /** Video codec (default: `'libx264'`). */
+  /**
+   * Video codec (default: `'libx264'`).
+   *
+   * GPU-accelerated encoders available on most systems:
+   * - `'h264_nvenc'` — NVIDIA GPU (requires NVIDIA GPU + drivers)
+   * - `'h264_amf'` — AMD GPU (requires AMD GPU + drivers)
+   * - `'h264_qsv'` — Intel Quick Sync Video
+   * - `'libx264'` — CPU (always available, default)
+   */
   codec?: string;
-  /** H.264 CRF quality value (default: 18). */
+  /** H.264 CRF quality value for libx264 (default: 18). Ignored by GPU encoders. */
   quality?: number;
+  /**
+   * GPU device index for hardware-accelerated encoding (default: 0).
+   * Only used when `codec` is a GPU encoder (e.g. h264_nvenc, h264_amf).
+   * Set to 1 to use the second GPU, etc.
+   */
+  gpuDevice?: number;
+  /**
+   * Quality preset for GPU encoders (default: 'p4' for NVENC, 'balanced' for AMF).
+   * - NVENC: 'p1' (fastest) to 'p7' (best quality)
+   * - AMF: 'speed', 'balanced', 'quality'
+   * - libx264: 'ultrafast', 'superfast', 'veryfast', 'faster', 'fast',
+   *   'medium', 'slow', 'slower', 'veryslow'
+   */
+  preset?: string;
 }

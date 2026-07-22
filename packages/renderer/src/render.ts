@@ -26,7 +26,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
-import { createCanvas, type SKRSContext2D } from '@napi-rs/canvas';
+import { createCanvas, type Canvas, type SKRSContext2D } from '@napi-rs/canvas';
 import type {
   ChoreographyTarget,
   ObjectTrajectory,
@@ -191,8 +191,6 @@ export async function render(
   const totalFrames = Math.max(1, Math.ceil(maxTSec * fps) + 1);
 
   // --- Precompute impacts for particle bursts (Req 5.2) ----------------------
-  // Resolve each impact keyframe's target to recover the burst position/color;
-  // fall back to the keyframe's own position if the target is missing.
   const targetsById = new Map<string, ChoreographyTarget>();
   for (const target of targets) {
     targetsById.set(target.noteId, target);
@@ -216,65 +214,198 @@ export async function render(
   const drawParticles = config.particlesOnImpact !== false;
   const trailLength = Math.max(2, Math.round(fps * TRAIL_SECONDS));
 
-  // One canvas, reused for every frame: draw -> encode -> write -> overwrite.
+  // --- Pre-compute all ball positions and trails ----------------------------
+  // This allows parallel rendering: each frame's state is fully determined
+  // without sequential dependency.
+  const allBallPositions: Array<[number, number]> = [];
+  for (let i = 0; i < totalFrames; i++) {
+    allBallPositions.push(interpolatePosition(keyframes, i / fps));
+  }
+
+  // Pre-compute trail windows for each frame (the last N positions up to and
+  // including this frame).
+  const allTrails: Array<Array<[number, number]>> = [];
+  if (drawTrail) {
+    for (let i = 0; i < totalFrames; i++) {
+      const start = Math.max(0, i - trailLength + 1);
+      allTrails.push(allBallPositions.slice(start, i + 1));
+    }
+  }
+
+  // --- Determine parallelism ------------------------------------------------
+  const parallelism = Math.max(1, Math.min(config.parallelFrames ?? 1, totalFrames));
+
+  if (parallelism <= 1) {
+    // Sequential path (original behavior) — single canvas, no overhead.
+    return renderSequential(
+      totalFrames, width, height, fps, backgroundColor, ballRadius, outputDir,
+      targets, impacts, allBallPositions, allTrails, drawTrail, drawParticles,
+    );
+  }
+
+  // --- Parallel path: render frame batches concurrently ----------------------
+  // Each "slot" gets its own canvas instance (they can't be shared). Frames are
+  // dispatched round-robin across slots to keep all cores busy while maintaining
+  // output ordering.
+  return renderParallel(
+    totalFrames, parallelism, width, height, fps, backgroundColor, ballRadius, outputDir,
+    targets, impacts, allBallPositions, allTrails, drawTrail, drawParticles,
+  );
+}
+
+/** Sequential renderer — original single-canvas loop. */
+async function renderSequential(
+  totalFrames: number,
+  width: number, height: number, fps: number,
+  backgroundColor: string, ballRadius: number, outputDir: string,
+  targets: readonly ChoreographyTarget[],
+  impacts: readonly ImpactEvent[],
+  allBallPositions: ReadonlyArray<[number, number]>,
+  allTrails: ReadonlyArray<ReadonlyArray<[number, number]>>,
+  drawTrail: boolean, drawParticles: boolean,
+): Promise<string[]> {
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext('2d');
-
   const framePaths: string[] = [];
-  const trail: Array<[number, number]> = [];
   let failures = 0;
 
   for (let i = 0; i < totalFrames; i++) {
-    const t = i / fps;
-    const ballPos = interpolatePosition(keyframes, t);
-
-    // Maintain the trailing window of recent positions (ring buffer semantics).
-    // Done outside the try so the trail stays temporally correct even if a frame
-    // fails to encode.
-    trail.push(ballPos);
-    if (trail.length > trailLength) {
-      trail.shift();
-    }
-
     const frameName = `frame_${String(i + 1).padStart(5, '0')}.png`;
     const framePath = resolve(outputDir, frameName);
 
     try {
-      // Background clear.
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = backgroundColor;
-      ctx.fillRect(0, 0, width, height);
-
-      renderTargets(ctx, targets, ballRadius);
-      if (drawTrail) {
-        renderTrail(ctx, trail, ballRadius);
-      }
-      if (drawParticles) {
-        renderImpacts(ctx, impacts, t, ballRadius);
-      }
-      renderBall(ctx, ballPos, ballRadius);
+      drawFrame(ctx, width, height, i / fps, backgroundColor, ballRadius,
+        targets, impacts, allBallPositions[i]!, drawTrail ? allTrails[i]! : [], drawParticles);
 
       const png = await canvas.encode('png');
       await writeFile(framePath, png);
       framePaths.push(framePath);
     } catch (err) {
       failures++;
-      console.error(
-        `render: failed to render frame ${i + 1}/${totalFrames} (${frameName}): ${describeError(err)}`,
-      );
-      // Abort as soon as the failure budget is exceeded, rather than wasting
-      // time rendering the remainder of a doomed run (Req 5.6).
+      console.error(`render: failed frame ${i + 1}/${totalFrames}: ${describeError(err)}`);
       if (exceedsFailureBudget(failures, totalFrames)) {
         throw new RenderError(
-          `render aborted: ${failures} of ${totalFrames} frames failed to render ` +
-            `(> ${FRAME_FAILURE_BUDGET * 100}% budget).`,
+          `render aborted: ${failures} of ${totalFrames} frames failed (> ${FRAME_FAILURE_BUDGET * 100}% budget).`,
           { cause: err },
         );
       }
     }
   }
-
   return framePaths;
+}
+
+/** Parallel renderer — multiple canvas instances rendering concurrently. */
+async function renderParallel(
+  totalFrames: number, parallelism: number,
+  width: number, height: number, fps: number,
+  backgroundColor: string, ballRadius: number, outputDir: string,
+  targets: readonly ChoreographyTarget[],
+  impacts: readonly ImpactEvent[],
+  allBallPositions: ReadonlyArray<[number, number]>,
+  allTrails: ReadonlyArray<ReadonlyArray<[number, number]>>,
+  drawTrail: boolean, drawParticles: boolean,
+): Promise<string[]> {
+  const framePaths: (string | null)[] = new Array(totalFrames).fill(null);
+  let failures = 0;
+
+  // Semaphore: limits concurrent in-flight renders to `parallelism`.
+  let running = 0;
+  let nextFrame = 0;
+  const waitQueue: Array<() => void> = [];
+
+  function acquire(): Promise<void> {
+    if (running < parallelism) {
+      running++;
+      return Promise.resolve();
+    }
+    return new Promise<void>((res) => { waitQueue.push(res); });
+  }
+
+  function release(): void {
+    const next = waitQueue.shift();
+    if (next) {
+      next();
+    } else {
+      running--;
+    }
+  }
+
+  // Each parallel task gets its own canvas (can't share across async contexts).
+  // We pool them to avoid creating totalFrames canvases.
+  const canvasPool: Canvas[] = [];
+  for (let c = 0; c < parallelism; c++) {
+    canvasPool.push(createCanvas(width, height) as Canvas);
+  }
+  let poolIdx = 0;
+
+  function getCanvas() {
+    const c = canvasPool[poolIdx % canvasPool.length]!;
+    poolIdx++;
+    return c;
+  }
+
+  const renderFrame = async (i: number): Promise<void> => {
+    await acquire();
+    const canvas = getCanvas();
+    const ctx = canvas.getContext('2d');
+    const frameName = `frame_${String(i + 1).padStart(5, '0')}.png`;
+    const framePath = resolve(outputDir, frameName);
+
+    try {
+      drawFrame(ctx, width, height, i / fps, backgroundColor, ballRadius,
+        targets, impacts, allBallPositions[i]!, drawTrail ? (allTrails[i] ?? []) : [], drawParticles);
+
+      const png = await canvas.encode('png');
+      await writeFile(framePath, png);
+      framePaths[i] = framePath;
+    } catch (err) {
+      failures++;
+      console.error(`render: failed frame ${i + 1}/${totalFrames}: ${describeError(err)}`);
+      if (exceedsFailureBudget(failures, totalFrames)) {
+        throw new RenderError(
+          `render aborted: ${failures} of ${totalFrames} frames failed (> ${FRAME_FAILURE_BUDGET * 100}% budget).`,
+          { cause: err },
+        );
+      }
+    } finally {
+      release();
+    }
+  };
+
+  // Launch all frames with bounded concurrency.
+  const promises: Promise<void>[] = [];
+  for (let i = 0; i < totalFrames; i++) {
+    promises.push(renderFrame(i));
+  }
+  await Promise.all(promises);
+
+  // Collect successful paths in order, filtering out failures.
+  return framePaths.filter((p): p is string => p !== null);
+}
+
+/** Draw a single frame onto a canvas context (shared by sequential and parallel paths). */
+function drawFrame(
+  ctx: SKRSContext2D,
+  width: number, height: number, t: number,
+  backgroundColor: string, ballRadius: number,
+  targets: readonly ChoreographyTarget[],
+  impacts: readonly ImpactEvent[],
+  ballPos: readonly [number, number],
+  trail: ReadonlyArray<readonly [number, number]>,
+  drawParticles: boolean,
+): void {
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = backgroundColor;
+  ctx.fillRect(0, 0, width, height);
+
+  renderTargets(ctx, targets, ballRadius);
+  if (trail.length >= 2) {
+    renderTrail(ctx, trail, ballRadius);
+  }
+  if (drawParticles) {
+    renderImpacts(ctx, impacts, t, ballRadius);
+  }
+  renderBall(ctx, ballPos, ballRadius);
 }
 
 /** Render each choreography target as a "piano key" rectangle in its `colorHint` (Req 5.3). */

@@ -11,6 +11,10 @@ export interface GenerateOptions {
   width: number;
   height: number;
   layout: 'piano-keys' | 'lanes';
+  codec: string;
+  gpuDevice: number;
+  preset: string;
+  parallelFrames: number;
 }
 
 export interface PipelineStats {
@@ -37,6 +41,10 @@ export function App() {
     width: 1920,
     height: 1080,
     layout: 'piano-keys',
+    codec: 'libx264',
+    gpuDevice: 0,
+    preset: '',
+    parallelFrames: 4,
   });
   const [progress, setProgress] = useState<ProgressEvent[]>([]);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
@@ -59,6 +67,10 @@ export function App() {
     formData.append('width', String(options.width));
     formData.append('height', String(options.height));
     formData.append('layout', options.layout);
+    formData.append('codec', options.codec);
+    formData.append('gpuDevice', String(options.gpuDevice));
+    if (options.preset) formData.append('preset', options.preset);
+    formData.append('parallelFrames', String(options.parallelFrames));
 
     try {
       const res = await fetch('/api/generate', {

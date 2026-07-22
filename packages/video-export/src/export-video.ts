@@ -34,6 +34,68 @@ const DEFAULT_VIDEO_CODEC = 'libx264';
 const DEFAULT_CRF = 18;
 
 /**
+ * GPU encoders recognized by the quality/preset logic below.
+ * Each has different knobs for quality and device selection.
+ */
+const GPU_ENCODERS = new Set(['h264_nvenc', 'h264_amf', 'h264_qsv']);
+
+/**
+ * Build encoder-specific output options based on the codec, quality, preset,
+ * and GPU device. GPU encoders use different quality knobs than libx264's CRF.
+ *
+ * - libx264: `-crf <quality>`, `-preset <preset>`
+ * - h264_nvenc: `-cq <quality>`, `-preset <preset>`, `-gpu <device>`
+ * - h264_amf: `-quality <preset>`, `-rc cqp`, `-qp_i/qp_p <quality>`, `-gpu <device>`
+ * - h264_qsv: `-global_quality <quality>`, `-preset <preset>`
+ */
+function buildEncoderOptions(config: ExportConfig): string[] {
+  const codec = config.codec ?? DEFAULT_VIDEO_CODEC;
+  const quality = config.quality ?? DEFAULT_CRF;
+  const gpuDevice = config.gpuDevice ?? 0;
+
+  const opts: string[] = ['-pix_fmt', 'yuv420p'];
+
+  if (codec === 'h264_nvenc') {
+    // NVENC: constant-quality mode via -cq, preset p1-p7, device selection via -gpu
+    opts.push('-rc', 'constqp', '-cq', String(quality));
+    opts.push('-preset', config.preset ?? 'p4');
+    opts.push('-gpu', String(gpuDevice));
+  } else if (codec === 'h264_amf') {
+    // AMF: CQP rate control with quality presets, device via -gpu
+    opts.push('-rc', 'cqp', '-qp_i', String(quality), '-qp_p', String(quality));
+    opts.push('-quality', config.preset ?? 'balanced');
+    if (gpuDevice > 0) {
+      opts.push('-gpu', String(gpuDevice));
+    }
+  } else if (codec === 'h264_qsv') {
+    // QSV: global quality mode
+    opts.push('-global_quality', String(quality));
+    if (config.preset) {
+      opts.push('-preset', config.preset);
+    }
+  } else {
+    // libx264 (CPU) or unknown: use CRF
+    opts.push('-crf', String(quality));
+    if (config.preset) {
+      opts.push('-preset', config.preset);
+    }
+  }
+
+  return opts;
+}
+
+/**
+ * Build ffmpeg input options for hardware-accelerated decoding when using a
+ * GPU encoder. For image-sequence inputs (PNGs), hardware decode acceleration
+ * is not applicable — the images are decoded trivially by the CPU regardless.
+ * Only the encoding side benefits from GPU acceleration.
+ * Returns empty array (no hwaccel input options needed for our use case).
+ */
+function buildHwaccelInputOptions(_config: ExportConfig): string[] {
+  return [];
+}
+
+/**
  * AAC audio for the muxed track. The source audio may be WAV/MP3/FLAC/OGG;
  * re-encoding to AAC guarantees a codec the MP4 container accepts regardless of
  * the input format.
@@ -114,6 +176,47 @@ async function assertFfmpegAvailable(): Promise<void> {
   }
 }
 
+/**
+ * Detect which H.264 encoders are actually functional in the installed ffmpeg.
+ * Tests each encoder with a 1-frame synthetic encode to confirm it works at
+ * runtime (not just compiled in). Returns an array of working codec names.
+ * Always includes 'libx264' first if ffmpeg is available.
+ */
+export function detectAvailableEncoders(): Promise<string[]> {
+  const binary = resolveFfmpegBinary();
+  const candidates = ['libx264', 'h264_nvenc', 'h264_amf', 'h264_qsv'];
+
+  return new Promise<string[]>(async (resolve) => {
+    const working: string[] = [];
+
+    for (const codec of candidates) {
+      const ok = await testEncoder(binary, codec);
+      if (ok) working.push(codec);
+    }
+
+    resolve(working);
+  });
+}
+
+/** Test whether a specific encoder actually works by doing a 1-frame encode. */
+function testEncoder(binary: string, codec: string): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    try {
+      const child = spawn(binary, [
+        '-hide_banner', '-loglevel', 'error',
+        '-f', 'lavfi', '-i', 'color=c=black:s=64x64:d=0.04:r=25',
+        '-frames:v', '1', '-c:v', codec, '-f', 'null', '-',
+      ], { shell: false, stdio: ['ignore', 'ignore', 'ignore'] });
+
+      const timer = setTimeout(() => { child.kill(); resolve(false); }, 5000);
+      child.on('error', () => { clearTimeout(timer); resolve(false); });
+      child.on('close', (code) => { clearTimeout(timer); resolve(code === 0); });
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
 /** Validate the config fields `exportVideo` relies on, throwing `ExportError` on misuse. */
 function validateConfig(config: ExportConfig): void {
   const requireNonEmpty = (name: 'frameDir' | 'framePattern' | 'audioPath' | 'outputPath'): void => {
@@ -173,15 +276,16 @@ export async function exportVideo(
   await assertFfmpegAvailable();
 
   const videoCodec = config.codec ?? DEFAULT_VIDEO_CODEC;
-  const crf = config.quality ?? DEFAULT_CRF;
   const framesInput = join(config.frameDir, config.framePattern);
   const fps = String(config.fps);
+  const encoderOpts = buildEncoderOptions(config);
+  const hwaccelOpts = buildHwaccelInputOptions(config);
 
   return new Promise<string>((resolveExport, rejectExport) => {
     ffmpeg()
       // Input 0: the numbered PNG frames, read as an image sequence at `fps`.
       .input(framesInput)
-      .inputOptions(['-framerate', fps, '-start_number', '1'])
+      .inputOptions([...hwaccelOpts, '-framerate', fps, '-start_number', '1'])
       // Input 1: the original audio track to mux alongside the video.
       .input(config.audioPath)
       .videoCodec(videoCodec)
@@ -189,8 +293,7 @@ export async function exportVideo(
       .outputOptions([
         '-map', '0:v:0', // video from the frame sequence
         '-map', '1:a:0', // audio from the audio file
-        '-crf', String(crf),
-        '-pix_fmt', 'yuv420p',
+        ...encoderOpts,
         '-r', fps,
       ])
       .format('mp4')

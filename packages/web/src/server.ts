@@ -18,6 +18,7 @@ import cors from 'cors';
 import { nanoid } from 'nanoid';
 
 import { runPipeline, detectInputType, type ParsedArgs } from '@motionscore/cli';
+import { detectAvailableEncoders } from '@motionscore/video-export';
 import type { CLIOptions } from '@motionscore/types';
 
 // ---------------------------------------------------------------------------
@@ -236,6 +237,18 @@ const upload = multer({
   },
 });
 
+// GET /api/encoders — list available H.264 encoders (for the frontend dropdown)
+app.get('/api/encoders', async (_req: Request, res: Response) => {
+  const encoders = await detectAvailableEncoders();
+  const descriptions: Record<string, string> = {
+    'libx264': 'CPU (libx264)',
+    'h264_nvenc': 'NVIDIA GPU (NVENC)',
+    'h264_amf': 'AMD GPU (AMF)',
+    'h264_qsv': 'Intel GPU (Quick Sync)',
+  };
+  res.json(encoders.map((enc) => ({ id: enc, label: descriptions[enc] ?? enc })));
+});
+
 // POST /api/generate — start a new generation job
 app.post('/api/generate', upload.single('file'), async (req: Request, res: Response) => {
   if (!req.file) {
@@ -258,6 +271,10 @@ app.post('/api/generate', upload.single('file'), async (req: Request, res: Respo
   const width = req.body.width ? parseInt(req.body.width, 10) : 1920;
   const height = req.body.height ? parseInt(req.body.height, 10) : 1080;
   const layout = req.body.layout === 'lanes' ? 'lanes' : 'piano-keys';
+  const codec = req.body.codec || undefined;
+  const gpuDevice = req.body.gpuDevice !== undefined ? parseInt(req.body.gpuDevice, 10) : undefined;
+  const preset = req.body.preset || undefined;
+  const parallelFrames = req.body.parallelFrames ? parseInt(req.body.parallelFrames, 10) : 4;
 
   const job: Job = {
     id: jobId,
@@ -296,6 +313,10 @@ app.post('/api/generate', upload.single('file'), async (req: Request, res: Respo
       height,
       layout,
       verbose: true, // Always verbose so we capture progress
+      codec,
+      gpuDevice,
+      preset,
+      parallelFrames,
     };
 
     const parsed: ParsedArgs = { options, inputType };
