@@ -11,7 +11,8 @@
     "packages/trajectory-solver",
     "packages/renderer",
     "packages/video-export",
-    "packages/cli"
+    "packages/cli",
+    "packages/web"
   ],
   "bin": {
     "motionscore": "packages/cli/dist/bin.js"
@@ -22,7 +23,10 @@
     "clean": "tsc -b --clean",
     "start": "node packages/cli/dist/bin.js",
     "test": "vitest run --passWithNoTests",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "web:dev": "npm run dev -w @motionscore/web",
+    "web:build": "npm run build -w @motionscore/web",
+    "web:start": "npm run start -w @motionscore/web"
   },
   "devDependencies": {
     "typescript": "7.0.2",

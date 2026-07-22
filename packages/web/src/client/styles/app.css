@@ -1,0 +1,448 @@
+/* MotionScore Web UI — Dark theme */
+
+:root {
+  --bg-page: #0f0f1a;
+  --bg-card: #1a1a2e;
+  --bg-input: #12121f;
+  --accent: #4477ff;
+  --accent-hover: #5588ff;
+  --text-primary: #f0f0f5;
+  --text-secondary: #8888aa;
+  --success: #44cc88;
+  --error: #ff4466;
+  --border: #2a2a44;
+  --radius: 8px;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  background: var(--bg-page);
+  color: var(--text-primary);
+  line-height: 1.5;
+  min-height: 100vh;
+}
+
+.app {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 2rem;
+}
+
+/* Header */
+.app-header {
+  text-align: center;
+  margin-bottom: 2rem;
+}
+
+.app-header h1 {
+  font-size: 2rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.subtitle {
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+  margin-top: 0.25rem;
+}
+
+/* Main layout */
+.app-main {
+  display: grid;
+  grid-template-columns: 400px 1fr;
+  gap: 1.5rem;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .app-main {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Panels */
+.panel-left {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.panel-right {
+  min-height: 400px;
+}
+
+/* Card */
+.card {
+  background: var(--bg-card);
+  border-radius: var(--radius);
+  padding: 1.5rem;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
+}
+
+.card h2 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin-bottom: 1rem;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 0.8rem;
+}
+
+/* Drop zone */
+.drop-zone {
+  border: 2px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 2rem 1rem;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.drop-zone:hover,
+.drop-zone.dragging {
+  border-color: var(--accent);
+  background: rgba(68, 119, 255, 0.05);
+}
+
+.drop-zone.disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.drop-zone.has-file {
+  border-style: solid;
+  border-color: var(--accent);
+}
+
+.drop-prompt {
+  color: var(--text-secondary);
+}
+
+.drop-icon {
+  font-size: 2rem;
+  margin-bottom: 0.5rem;
+}
+
+.drop-hint {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  opacity: 0.7;
+}
+
+.file-info {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  text-align: left;
+}
+
+.file-icon {
+  font-size: 2rem;
+}
+
+.file-details {
+  display: flex;
+  flex-direction: column;
+}
+
+.file-name {
+  font-weight: 600;
+  word-break: break-all;
+}
+
+.file-meta {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+/* Presets */
+.presets {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
+.btn-preset {
+  font-size: 0.75rem;
+  padding: 0.35rem 0.75rem;
+  border-radius: 4px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.btn-preset:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.btn-preset.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+/* Form grid */
+.form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  margin-bottom: 1.25rem;
+}
+
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.form-label {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.form-field input,
+.form-field select {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.5rem 0.75rem;
+  color: var(--text-primary);
+  font-size: 0.9rem;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.form-field input:focus,
+.form-field select:focus {
+  border-color: var(--accent);
+}
+
+.form-field input:disabled,
+.form-field select:disabled {
+  opacity: 0.5;
+}
+
+/* Buttons */
+.btn {
+  border: none;
+  border-radius: var(--radius);
+  padding: 0.7rem 1.5rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  text-decoration: none;
+  display: inline-block;
+  text-align: center;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: white;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.btn-primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+}
+
+.btn-secondary:hover {
+  border-color: var(--accent);
+}
+
+.btn-generate {
+  width: 100%;
+  padding: 0.85rem;
+  font-size: 1rem;
+}
+
+/* Progress */
+.progress-card {
+  min-height: 300px;
+}
+
+.progress-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.75rem;
+}
+
+.progress-stage {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.progress-time {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.progress-bar-container {
+  background: var(--bg-input);
+  border-radius: 4px;
+  height: 8px;
+  overflow: hidden;
+  margin-bottom: 0.5rem;
+}
+
+.progress-bar {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+
+.progress-percent {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  text-align: right;
+  margin-bottom: 1rem;
+}
+
+.progress-log {
+  background: var(--bg-input);
+  border-radius: 4px;
+  padding: 0.75rem;
+  max-height: 250px;
+  overflow-y: auto;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 0.8rem;
+  line-height: 1.6;
+}
+
+.log-entry {
+  color: var(--text-secondary);
+  padding: 0.1rem 0;
+}
+
+.log-entry.log-error {
+  color: var(--error);
+}
+
+/* Video player */
+.video-card {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.video-wrapper {
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: #000;
+}
+
+.video-player {
+  width: 100%;
+  display: block;
+  max-height: 500px;
+}
+
+/* Stats grid */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1rem;
+}
+
+@media (max-width: 600px) {
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.stat {
+  text-align: center;
+  padding: 0.5rem;
+  background: var(--bg-input);
+  border-radius: 4px;
+}
+
+.stat-value {
+  display: block;
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-label {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+/* Video actions */
+.video-actions {
+  display: flex;
+  gap: 0.75rem;
+}
+
+/* Error card */
+.error-card {
+  text-align: center;
+  padding: 2rem;
+}
+
+.error-card h3 {
+  color: var(--error);
+  margin-bottom: 0.75rem;
+}
+
+.error-message {
+  color: var(--text-secondary);
+  margin-bottom: 1.5rem;
+  font-size: 0.9rem;
+}
+
+/* Placeholder card */
+.placeholder-card {
+  text-align: center;
+  padding: 4rem 2rem;
+  color: var(--text-secondary);
+}
+
+.placeholder-icon {
+  font-size: 3rem;
+  margin-bottom: 1rem;
+}
+
+/* Scrollbar styling */
+.progress-log::-webkit-scrollbar {
+  width: 6px;
+}
+
+.progress-log::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.progress-log::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
