@@ -1,0 +1,26 @@
+{
+  "name": "@motionscore/video-export",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Stage F: muxes the rendered frame sequence with audio into an MP4 via ffmpeg",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@motionscore/types": "0.1.0",
+    "fluent-ffmpeg": "2.1.3"
+  },
+  "devDependencies": {
+    "@types/fluent-ffmpeg": "2.1.28",
+    "@types/node": "26.1.1"
+  }
+}

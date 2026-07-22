@@ -1,0 +1,25 @@
+{
+  "name": "@motionscore/note-extractor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Stage B: extracts normalized NoteEvents from MIDI or audio input",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@motionscore/types": "0.1.0",
+    "@tonejs/midi": "2.0.28"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.1"
+  }
+}

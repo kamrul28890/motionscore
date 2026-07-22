@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "types": ["node"]
+  },
+  "include": ["src/**/*"],
+  "exclude": ["src/**/*.test.ts"],
+  "references": [
+    { "path": "../types" },
+    { "path": "../note-extractor" },
+    { "path": "../musical-mapper" },
+    { "path": "../trajectory-solver" },
+    { "path": "../renderer" },
+    { "path": "../video-export" }
+  ]
+}

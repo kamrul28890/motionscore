@@ -1,0 +1,32 @@
+{
+  "name": "motionscore",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CLI-based music-to-physics video generator (monorepo)",
+  "type": "module",
+  "workspaces": [
+    "packages/types",
+    "packages/note-extractor",
+    "packages/musical-mapper",
+    "packages/trajectory-solver",
+    "packages/renderer",
+    "packages/video-export",
+    "packages/cli"
+  ],
+  "bin": {
+    "motionscore": "packages/cli/dist/bin.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "clean": "tsc -b --clean",
+    "start": "node packages/cli/dist/bin.js",
+    "test": "vitest run --passWithNoTests",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "vitest": "4.1.10",
+    "fast-check": "4.9.0"
+  }
+}

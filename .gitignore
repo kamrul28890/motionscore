@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Test / coverage artifacts
+coverage/
+
+# Runtime pipeline artifacts
+tmp/
+*.log
+
+# Editor / OS
+.DS_Store
+Thumbs.db
