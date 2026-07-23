@@ -3,10 +3,14 @@ import { FileUpload } from './components/FileUpload.js';
 import { ConfigForm } from './components/ConfigForm.js';
 import { ProgressDisplay } from './components/ProgressDisplay.js';
 import { VideoPlayer } from './components/VideoPlayer.js';
+import { AnalysisPanel } from './components/AnalysisPanel.js';
 
 export type AppState = 'idle' | 'uploading' | 'generating' | 'complete' | 'error';
 
+export type ExtractionMode = 'auto' | 'beats' | 'onsets' | 'notes';
+
 export interface GenerateOptions {
+  mode: ExtractionMode;
   fps: number;
   width: number;
   height: number;
@@ -24,12 +28,40 @@ export interface PipelineStats {
   maxSyncErrorMs: number;
 }
 
+export type HitRole = 'kick' | 'bass' | 'snare' | 'percussion' | 'melodic';
+
+export interface SectionCue {
+  type: 'build' | 'drop' | 'breakdown' | 'rise' | 'fall';
+  startSec: number;
+  endSec: number;
+  peakSec?: number;
+  intensity: number;
+  confidence: number;
+}
+
+export interface AudioEnergySample {
+  timeSec: number;
+  loudness: number;
+  bassEnergy: number;
+}
+
+export interface AudioAnalysisSummary {
+  mode: 'smart' | 'beats' | 'onsets';
+  tempoBpm: number;
+  durationSec: number;
+  hitCount: number;
+  roleCounts: Record<HitRole, number>;
+  sectionCues: SectionCue[];
+  energyTimeline: AudioEnergySample[];
+}
+
 export interface ProgressEvent {
   stage?: string;
   message: string;
   percent?: number;
   status?: 'complete' | 'error';
   stats?: PipelineStats;
+  analysis?: AudioAnalysisSummary;
   videoUrl?: string;
 }
 
@@ -37,6 +69,7 @@ export function App() {
   const [state, setState] = useState<AppState>('idle');
   const [file, setFile] = useState<File | null>(null);
   const [options, setOptions] = useState<GenerateOptions>({
+    mode: 'auto',
     fps: 60,
     width: 1920,
     height: 1080,
@@ -50,6 +83,7 @@ export function App() {
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
   const [stats, setStats] = useState<PipelineStats | null>(null);
+  const [analysis, setAnalysis] = useState<AudioAnalysisSummary | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const handleGenerate = useCallback(async () => {
@@ -59,10 +93,12 @@ export function App() {
     setProgress([]);
     setVideoUrl(null);
     setStats(null);
+    setAnalysis(null);
     setErrorMessage(null);
 
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('mode', options.mode);
     formData.append('fps', String(options.fps));
     formData.append('width', String(options.width));
     formData.append('height', String(options.height));
@@ -98,6 +134,7 @@ export function App() {
           setState('complete');
           setVideoUrl(data.videoUrl ?? `/api/video/${id}`);
           setStats(data.stats ?? null);
+          setAnalysis(data.analysis ?? null);
           eventSource.close();
         } else if (data.status === 'error') {
           setState('error');
@@ -130,6 +167,7 @@ export function App() {
     setVideoUrl(null);
     setJobId(null);
     setStats(null);
+    setAnalysis(null);
     setErrorMessage(null);
   }, []);
 
@@ -162,12 +200,15 @@ export function App() {
           )}
 
           {state === 'complete' && videoUrl && (
-            <VideoPlayer
-              videoUrl={videoUrl}
-              jobId={jobId!}
-              stats={stats}
-              onReset={handleReset}
-            />
+            <>
+              <VideoPlayer
+                videoUrl={videoUrl}
+                jobId={jobId!}
+                stats={stats}
+                onReset={handleReset}
+              />
+              {analysis && <AnalysisPanel analysis={analysis} />}
+            </>
           )}
 
           {state === 'error' && (

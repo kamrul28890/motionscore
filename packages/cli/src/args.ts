@@ -30,6 +30,12 @@ type Layout = (typeof LAYOUTS)[number];
 /** Default layout strategy when `--layout` is omitted. */
 const DEFAULT_LAYOUT: Layout = 'piano-keys';
 
+/** Supported extraction modes; the first entry is the default. */
+const MODES = ['auto', 'beats', 'onsets', 'notes'] as const;
+type Mode = (typeof MODES)[number];
+/** Default extraction mode when `--mode` is omitted. */
+const DEFAULT_MODE: Mode = 'auto';
+
 /** Extensions routed to the MIDI parser (lower-cased, leading dot included). */
 const MIDI_EXTENSIONS: ReadonlySet<string> = new Set(['.mid', '.midi']);
 /** Extensions routed to the audio transcriber (lower-cased, leading dot). */
@@ -62,6 +68,7 @@ interface RawCliOptions {
   width: number;
   height: number;
   layout: Layout;
+  mode: Mode;
   verbose: boolean;
 }
 
@@ -150,6 +157,15 @@ export function buildProgram(): Command {
         .choices(LAYOUTS)
         .default(DEFAULT_LAYOUT),
     )
+    .addOption(
+      new Option(
+        '--mode <mode>',
+        'what the ball hits (audio only): auto (smart stem-aware attacks), ' +
+          'beats (metrical pulse), onsets (all full-mix attacks), or notes (full transcription)',
+      )
+        .choices(MODES)
+        .default(DEFAULT_MODE),
+    )
     .option('--verbose', 'print progress information for each pipeline stage', false);
   return program;
 }
@@ -203,6 +219,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     width: opts.width,
     height: opts.height,
     layout: opts.layout,
+    mode: opts.mode,
     verbose: opts.verbose,
   };
 

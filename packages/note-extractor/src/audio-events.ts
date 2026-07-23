@@ -1,0 +1,495 @@
+// @motionscore/note-extractor — stem-aware rhythmic audio analysis
+//
+// The Python helper uses librosa HPSS and independent low/mid/high-frequency
+// onset envelopes to select salient attacks from a full mix. This wrapper keeps
+// the established NoteEvent[] API while also exposing the continuous feature
+// timeline and structural cues needed by future renderers.
+
+import { spawn } from 'node:child_process';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import {
+  TranscriptionError,
+  type AudioAnalysis,
+  type AudioAnalysisMode,
+  type AudioFeatureFrame,
+  type HitRole,
+  type NoteEvent,
+  type SectionCue,
+} from '@motionscore/types';
+
+/** Strategies implemented by the librosa helper. */
+export type AudioEventExtractionMode = AudioAnalysisMode;
+/** Backward-compatible name retained for existing imports. */
+export type BeatExtractionMode = AudioEventExtractionMode;
+
+const PYTHON_ENV_VAR = 'PYTHON';
+const DEFAULT_PYTHON = 'python';
+const SCRIPT_PATH = fileURLToPath(new URL('../python/extract_events.py', import.meta.url));
+const EVENT_DURATION_SEC = 0.12;
+const MIN_EVENT_GAP_SEC = 0.09;
+const NOTE_ID_DIGITS = 4;
+/** Safety bound for a hung decoder/analyzer subprocess. */
+const ANALYZER_TIMEOUT_MS = 15 * 60 * 1000;
+
+const HIT_ROLES: ReadonlySet<string> = new Set([
+  'kick',
+  'bass',
+  'snare',
+  'percussion',
+  'melodic',
+]);
+const SECTION_CUE_TYPES: ReadonlySet<string> = new Set([
+  'build',
+  'drop',
+  'breakdown',
+  'rise',
+  'fall',
+]);
+
+const SETUP_HINT =
+  'Audio analysis needs Python 3 with librosa. Run the lightweight setup script ' +
+  '(scripts/setup-audio.ps1 on Windows, scripts/setup-audio.sh on macOS/Linux), ' +
+  'then set the PYTHON environment variable to the venv Python (for example ' +
+  '.venv/Scripts/python.exe or .venv/bin/python).';
+
+interface RawEvent {
+  timeSec: number;
+  pitchMidi: number;
+  velocity: number;
+  role?: string;
+  confidence?: number;
+  salience?: number;
+}
+
+interface RawFeatureFrame {
+  timeSec: number;
+  loudness: number;
+  bassEnergy: number;
+  brightness: number;
+  onsetDensity: number;
+  harmonicEnergy: number;
+  percussiveEnergy: number;
+}
+
+interface RawSectionCue {
+  type: string;
+  startSec: number;
+  endSec: number;
+  peakSec?: number;
+  intensity: number;
+  confidence: number;
+}
+
+interface RawExtractionResult {
+  version: 1;
+  durationSec: number;
+  tempo: number;
+  mode: AudioAnalysisMode;
+  events: RawEvent[];
+  featureFrames: RawFeatureFrame[];
+  sectionCues: RawSectionCue[];
+}
+
+/**
+ * Run the rich librosa analysis and return discrete hits plus scene-level data.
+ * This is the preferred API for renderers and analysis UIs.
+ */
+export async function analyzeAudioEvents(
+  audioPath: string,
+  mode: AudioEventExtractionMode = 'smart',
+): Promise<AudioAnalysis> {
+  const python = process.env[PYTHON_ENV_VAR] ?? DEFAULT_PYTHON;
+  const workDir = await mkdtemp(join(tmpdir(), 'motionscore-analysis-'));
+  const outJson = join(workDir, 'analysis.json');
+
+  try {
+    await runExtractor(python, audioPath, outJson, mode);
+    const rawJson = await readFile(outJson, 'utf8');
+    const result = parseExtractionResult(JSON.parse(rawJson) as unknown, audioPath, mode);
+    return {
+      version: 1,
+      durationSec: result.durationSec,
+      tempoBpm: result.tempo,
+      mode: result.mode,
+      hits: buildNoteEvents(result.events),
+      featureFrames: buildFeatureFrames(result.featureFrames),
+      sectionCues: buildSectionCues(result.sectionCues),
+    };
+  } catch (cause) {
+    if (cause instanceof TranscriptionError) throw cause;
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    throw new TranscriptionError(
+      `Unable to read or validate audio analyzer output for "${audioPath}": ${detail}`,
+      { cause },
+    );
+  } finally {
+    await rm(workDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Backward-compatible Stage B helper returning only the selected NoteEvent[].
+ * Use {@link analyzeAudioEvents} when feature frames or section cues are needed.
+ */
+export async function extractAudioEvents(
+  audioPath: string,
+  mode: AudioEventExtractionMode,
+): Promise<NoteEvent[]> {
+  return (await analyzeAudioEvents(audioPath, mode)).hits;
+}
+
+function runExtractor(
+  python: string,
+  audioPath: string,
+  outJson: string,
+  mode: AudioEventExtractionMode,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(python, [SCRIPT_PATH, audioPath, outJson, mode], {
+      shell: false,
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+    });
+
+    let stderr = '';
+    let settled = false;
+    let timeout: NodeJS.Timeout | undefined;
+    const clearAnalyzerTimeout = (): void => {
+      if (timeout !== undefined) clearTimeout(timeout);
+    };
+    const rejectOnce = (error: TranscriptionError): void => {
+      if (!settled) {
+        settled = true;
+        clearAnalyzerTimeout();
+        reject(error);
+      }
+    };
+    timeout = setTimeout(() => {
+      child.kill();
+      rejectOnce(
+        new TranscriptionError(
+          `Audio ${mode} analysis timed out after ${ANALYZER_TIMEOUT_MS / 60_000} minutes for "${audioPath}".`,
+        ),
+      );
+    }, ANALYZER_TIMEOUT_MS);
+
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+
+    child.on('error', (cause: Error) => {
+      const code = (cause as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') {
+        rejectOnce(
+          new TranscriptionError(`Python executable "${python}" was not found. ${SETUP_HINT}`, {
+            cause,
+          }),
+        );
+        return;
+      }
+      rejectOnce(
+        new TranscriptionError(
+          `Failed to start the audio analysis subprocess ("${python}"): ${cause.message}. ${SETUP_HINT}`,
+          { cause },
+        ),
+      );
+    });
+
+    child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearAnalyzerTimeout();
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      const detail = stderr.trim();
+      const dependencyHint = /ModuleNotFoundError|No module named|ImportError/i.test(detail)
+        ? ` ${SETUP_HINT}`
+        : '';
+      reject(
+        new TranscriptionError(
+          `Audio ${mode} analysis exited with code ${code ?? 'null'} for "${audioPath}".${dependencyHint}` +
+            (detail.length > 0 ? `\n--- librosa output ---\n${detail}` : ''),
+          detail.length > 0 ? { stderr: detail } : undefined,
+        ),
+      );
+    });
+  });
+}
+
+function parseExtractionResult(
+  value: unknown,
+  audioPath: string,
+  expectedMode: AudioEventExtractionMode,
+): RawExtractionResult {
+  const root = requireRecord(value, audioPath, 'root');
+  if (root['version'] !== 1) invalidOutput(audioPath, 'version', root['version']);
+
+  const durationSec = requireNumber(root, 'durationSec', audioPath, 0);
+  const tempo = requireNumber(root, 'tempo', audioPath, 0);
+  const rawMode = root['mode'];
+  if (typeof rawMode !== 'string' || !isAnalysisMode(rawMode)) {
+    invalidOutput(audioPath, 'mode', rawMode);
+  }
+  if (rawMode !== expectedMode) {
+    throw new TranscriptionError(
+      `Audio analyzer mode mismatch for "${audioPath}": requested ${expectedMode}, received ${rawMode}.`,
+    );
+  }
+
+  const rawEvents = requireArray(root, 'events', audioPath);
+  const events = rawEvents.map((item, index): RawEvent => {
+    const path = `events[${index}]`;
+    const record = requireRecord(item, audioPath, path);
+    const event: RawEvent = {
+      timeSec: requireNumber(record, 'timeSec', audioPath, 0, durationSec + 0.1, path),
+      pitchMidi: requireNumber(record, 'pitchMidi', audioPath, 0, 127, path),
+      velocity: requireNumber(record, 'velocity', audioPath, 0, 1, path),
+    };
+    const role = record['role'];
+    if (role !== undefined) {
+      if (typeof role !== 'string' || !HIT_ROLES.has(role)) {
+        invalidOutput(audioPath, `${path}.role`, role);
+      }
+      event.role = role;
+    }
+    const confidence = optionalUnitNumber(record, 'confidence', audioPath, path);
+    if (confidence !== undefined) event.confidence = confidence;
+    const salience = optionalUnitNumber(record, 'salience', audioPath, path);
+    if (salience !== undefined) event.salience = salience;
+    return event;
+  });
+
+  const rawFrames = requireArray(root, 'featureFrames', audioPath);
+  const featureFrames = rawFrames.map((item, index): RawFeatureFrame => {
+    const path = `featureFrames[${index}]`;
+    const record = requireRecord(item, audioPath, path);
+    return {
+      timeSec: requireNumber(record, 'timeSec', audioPath, 0, durationSec + 0.1, path),
+      loudness: requireNumber(record, 'loudness', audioPath, 0, 1, path),
+      bassEnergy: requireNumber(record, 'bassEnergy', audioPath, 0, 1, path),
+      brightness: requireNumber(record, 'brightness', audioPath, 0, 1, path),
+      onsetDensity: requireNumber(record, 'onsetDensity', audioPath, 0, 1, path),
+      harmonicEnergy: requireNumber(record, 'harmonicEnergy', audioPath, 0, 1, path),
+      percussiveEnergy: requireNumber(record, 'percussiveEnergy', audioPath, 0, 1, path),
+    };
+  });
+
+  const rawCues = requireArray(root, 'sectionCues', audioPath);
+  const sectionCues = rawCues.map((item, index): RawSectionCue => {
+    const path = `sectionCues[${index}]`;
+    const record = requireRecord(item, audioPath, path);
+    const type = record['type'];
+    if (typeof type !== 'string' || !SECTION_CUE_TYPES.has(type)) {
+      invalidOutput(audioPath, `${path}.type`, type);
+    }
+    const startSec = requireNumber(record, 'startSec', audioPath, 0, durationSec + 0.1, path);
+    const endSec = requireNumber(record, 'endSec', audioPath, startSec, durationSec + 0.1, path);
+    const cue: RawSectionCue = {
+      type,
+      startSec,
+      endSec,
+      intensity: requireNumber(record, 'intensity', audioPath, 0, 1, path),
+      confidence: requireNumber(record, 'confidence', audioPath, 0, 1, path),
+    };
+    const peakSec = record['peakSec'];
+    if (peakSec !== undefined) {
+      if (typeof peakSec !== 'number' || !Number.isFinite(peakSec) || peakSec < 0 || peakSec > durationSec + 0.1) {
+        invalidOutput(audioPath, `${path}.peakSec`, peakSec);
+      }
+      cue.peakSec = peakSec;
+    }
+    return cue;
+  });
+
+  return {
+    version: 1,
+    durationSec,
+    tempo,
+    mode: rawMode,
+    events,
+    featureFrames,
+    sectionCues,
+  };
+}
+
+function requireRecord(
+  value: unknown,
+  audioPath: string,
+  path: string,
+): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    invalidOutput(audioPath, path, value);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireArray(
+  record: Record<string, unknown>,
+  key: string,
+  audioPath: string,
+): unknown[] {
+  const value = record[key];
+  if (!Array.isArray(value)) invalidOutput(audioPath, key, value);
+  return value;
+}
+
+function requireNumber(
+  record: Record<string, unknown>,
+  key: string,
+  audioPath: string,
+  minimum: number,
+  maximum = Number.POSITIVE_INFINITY,
+  parentPath = '',
+): number {
+  const value = record[key];
+  if (
+    typeof value !== 'number' ||
+    !Number.isFinite(value) ||
+    value < minimum ||
+    value > maximum
+  ) {
+    invalidOutput(audioPath, parentPath.length > 0 ? `${parentPath}.${key}` : key, value);
+  }
+  return value;
+}
+
+function optionalUnitNumber(
+  record: Record<string, unknown>,
+  key: string,
+  audioPath: string,
+  parentPath: string,
+): number | undefined {
+  if (record[key] === undefined) return undefined;
+  return requireNumber(record, key, audioPath, 0, 1, parentPath);
+}
+
+function invalidOutput(audioPath: string, path: string, value: unknown): never {
+  let rendered: string;
+  try {
+    rendered = JSON.stringify(value);
+  } catch {
+    rendered = String(value);
+  }
+  if (rendered.length > 160) rendered = `${rendered.slice(0, 157)}...`;
+  throw new TranscriptionError(
+    `Audio analyzer returned an invalid version-1 payload for "${audioPath}" at ${path}: ${rendered}.`,
+  );
+}
+
+/**
+ * Normalize raw analyzer events and keep the stronger event when two hits are
+ * too close for the trajectory solver. Smart mode normally performs this in
+ * Python; retaining the guard here protects every analyzer mode and schema.
+ */
+function buildNoteEvents(rawEvents: readonly RawEvent[]): NoteEvent[] {
+  const sorted = rawEvents
+    .filter((event) => Number.isFinite(event.timeSec) && event.timeSec >= 0)
+    .slice()
+    .sort((a, b) => a.timeSec - b.timeSec);
+
+  const selected: RawEvent[] = [];
+  for (const event of sorted) {
+    const previous = selected[selected.length - 1];
+    if (previous !== undefined && event.timeSec - previous.timeSec < MIN_EVENT_GAP_SEC) {
+      if (eventPriority(event) > eventPriority(previous)) {
+        selected[selected.length - 1] = event;
+      }
+      continue;
+    }
+    selected.push(event);
+  }
+
+  return selected.map((event, index) => {
+    const note: NoteEvent = {
+      id: `n${String(index + 1).padStart(NOTE_ID_DIGITS, '0')}`,
+      pitchMidi: clampPitch(event.pitchMidi),
+      startSec: event.timeSec,
+      endSec: event.timeSec + EVENT_DURATION_SEC,
+      velocity: clamp01(event.velocity, 0.6),
+      source: 'audio',
+    };
+    if (event.role !== undefined && HIT_ROLES.has(event.role)) {
+      const role = event.role as HitRole;
+      note.role = role;
+      note.track = role;
+      note.instrument = role;
+    }
+    if (event.confidence !== undefined) {
+      note.confidence = clamp01(event.confidence, 0.5);
+    }
+    if (event.salience !== undefined) {
+      note.salience = clamp01(event.salience, note.velocity);
+    }
+    return note;
+  });
+}
+
+function buildFeatureFrames(rawFrames: readonly RawFeatureFrame[]): AudioFeatureFrame[] {
+  return rawFrames
+    .filter((frame) => Number.isFinite(frame.timeSec) && frame.timeSec >= 0)
+    .map((frame) => ({
+      timeSec: nonNegative(frame.timeSec),
+      loudness: clamp01(frame.loudness),
+      bassEnergy: clamp01(frame.bassEnergy),
+      brightness: clamp01(frame.brightness),
+      onsetDensity: clamp01(frame.onsetDensity),
+      harmonicEnergy: clamp01(frame.harmonicEnergy),
+      percussiveEnergy: clamp01(frame.percussiveEnergy),
+    }))
+    .sort((a, b) => a.timeSec - b.timeSec);
+}
+
+function buildSectionCues(rawCues: readonly RawSectionCue[]): SectionCue[] {
+  const cues: SectionCue[] = [];
+  for (const raw of rawCues) {
+    if (
+      !SECTION_CUE_TYPES.has(raw.type) ||
+      !Number.isFinite(raw.startSec) ||
+      !Number.isFinite(raw.endSec) ||
+      raw.startSec < 0 ||
+      raw.endSec < raw.startSec
+    ) {
+      continue;
+    }
+    const cue: SectionCue = {
+      type: raw.type as SectionCue['type'],
+      startSec: raw.startSec,
+      endSec: raw.endSec,
+      intensity: clamp01(raw.intensity),
+      confidence: clamp01(raw.confidence),
+    };
+    if (raw.peakSec !== undefined && Number.isFinite(raw.peakSec) && raw.peakSec >= 0) {
+      cue.peakSec = raw.peakSec;
+    }
+    cues.push(cue);
+  }
+  return cues.sort((a, b) => a.startSec - b.startSec || a.type.localeCompare(b.type));
+}
+
+function eventPriority(event: RawEvent): number {
+  if (Number.isFinite(event.salience)) return event.salience as number;
+  return Number.isFinite(event.velocity) ? event.velocity : 0;
+}
+
+function isAnalysisMode(value: string): value is AudioAnalysisMode {
+  return value === 'smart' || value === 'beats' || value === 'onsets';
+}
+
+function nonNegative(value: number): number {
+  return Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+function clampPitch(pitch: number): number {
+  if (!Number.isFinite(pitch)) return 60;
+  return Math.max(21, Math.min(108, Math.round(pitch)));
+}
+
+function clamp01(value: number, fallback = 0): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(0, Math.min(1, value));
+}

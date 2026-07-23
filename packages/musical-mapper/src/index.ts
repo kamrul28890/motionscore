@@ -10,8 +10,11 @@
 import {
   validateChoreographyTargets,
   type ChoreographyTarget,
+  type HitRole,
   type LayoutConfig,
   type NoteEvent,
+  type VoiceGrouping,
+  type VoicePlan,
 } from '@motionscore/types';
 
 /** Number of pitch classes in the chromatic scale (one octave). */
@@ -273,6 +276,76 @@ function applyDensityFilter(
  * @returns Time-sorted choreography targets; length is <= `notes.length`.
  * @throws {ValidationError} if any produced target violates the contract.
  */
+const ROLE_LANE_POSITION = {
+  kick: 0.46,
+  bass: 0.34,
+  snare: 0.58,
+  percussion: 0.70,
+  melodic: 0.52,
+} as const;
+
+/** Keep analyzer-driven targets away from the extreme edges of the canvas. */
+const AUDIO_TARGET_MARGIN_FRACTION = 0.1;
+/** Maximum analyzer-driven horizontal travel, expressed in canvas widths/sec. */
+const AUDIO_TARGET_MAX_SPEED = 0.8;
+/** Ignore tiny analyzer-position fluctuations that read as visual trembling. */
+const AUDIO_TARGET_DEADBAND_FRACTION = 0.025;
+
+function desiredTargetX(
+  note: NoteEvent,
+  config: LayoutConfig,
+  pitchRange: [number, number],
+): number {
+  if (config.type === 'lanes' && note.source === 'audio' && note.role !== undefined) {
+    return ROLE_LANE_POSITION[note.role] * config.canvasWidth;
+  }
+  return pitchToX(note.pitchMidi, config.canvasWidth, pitchRange);
+}
+
+/**
+ * Slew-limit only role-labelled audio hits. Real MIDI remains an exact
+ * pitch-to-position mapping, while mixed-audio pseudo-pitches act as stable
+ * choreography hints rather than asking the ball to cross the screen in 90 ms.
+ */
+function stabilizeAudioHitPositions(
+  targets: ChoreographyTarget[],
+  notes: readonly NoteEvent[],
+  canvasWidth: number,
+): void {
+  const noteById = new Map(notes.map((note) => [note.id, note] as const));
+  if (!notes.some((note) => note.source === 'audio' && note.role !== undefined)) return;
+
+  const margin = canvasWidth * AUDIO_TARGET_MARGIN_FRACTION;
+  const deadband = canvasWidth * AUDIO_TARGET_DEADBAND_FRACTION;
+  let previousX = canvasWidth / 2;
+  let previousTime = 0;
+
+  for (const target of targets) {
+    const note = noteById.get(target.noteId);
+    if (note?.source !== 'audio' || note.role === undefined) {
+      previousX = target.position.x;
+      previousTime = target.timeSec;
+      continue;
+    }
+
+    const desiredX = Math.max(margin, Math.min(canvasWidth - margin, target.position.x));
+    const deltaTime = Math.max(0, target.timeSec - previousTime);
+    const maxTravel = Math.max(
+      canvasWidth * 0.02,
+      canvasWidth * AUDIO_TARGET_MAX_SPEED * deltaTime,
+    );
+    const requestedDelta = desiredX - previousX;
+    const nextX =
+      Math.abs(requestedDelta) <= deadband
+        ? previousX
+        : previousX + Math.max(-maxTravel, Math.min(maxTravel, requestedDelta));
+
+    target.position.x = Math.max(margin, Math.min(canvasWidth - margin, nextX));
+    previousX = target.position.x;
+    previousTime = target.timeSec;
+  }
+}
+
 export function mapNotes(
   notes: NoteEvent[],
   config: LayoutConfig,
@@ -284,21 +357,26 @@ export function mapNotes(
 
   const retained = applyDensityFilter(notes, config);
 
-  const targets: ChoreographyTarget[] = retained.map((note) => ({
-    noteId: note.id,
-    timeSec: note.startSec,
-    position: {
-      x: pitchToX(note.pitchMidi, config.canvasWidth, pitchRange),
-      y: config.targetY,
-    },
-    impactSize: velocityToImpactSize(note.velocity),
-    colorHint: pitchToColor(note.pitchMidi),
-  }));
+  const targets: ChoreographyTarget[] = retained.map((note) => {
+    const target: ChoreographyTarget = {
+      noteId: note.id,
+      timeSec: note.startSec,
+      position: {
+        x: desiredTargetX(note, config, pitchRange),
+        y: config.targetY,
+      },
+      impactSize: velocityToImpactSize(note.velocity),
+      colorHint: pitchToColor(note.pitchMidi),
+    };
+    if (note.role !== undefined) target.role = note.role;
+    return target;
+  });
 
   // Chronological order (Req 3.6); id tiebreak keeps equal-time output stable.
   targets.sort(
     (a, b) => a.timeSec - b.timeSec || compareStrings(a.noteId, b.noteId),
   );
+  stabilizeAudioHitPositions(targets, retained, config.canvasWidth);
 
   // Enforce the Stage C output contract before returning (Req 3.2). Passing the
   // source notes also verifies noteId references and timeSec/startSec agreement.
@@ -310,4 +388,132 @@ export function mapNotes(
   );
 
   return targets;
+}
+
+// --- Voice planning (multi-ball, Phase 1) ----------------------------------
+//
+// `planVoices` partitions already-mapped ChoreographyTargets into one or more
+// VoicePlans (one ball each). The solver turns each plan into a full Voice by
+// attaching a trajectory. See docs/MULTI_BALL_PLAN.md.
+
+/** Neutral ball tint for the single/combined voice (matches the renderer ball). */
+const DEFAULT_VOICE_COLOR = '#f5f5fa';
+
+/**
+ * Per-role ball tint so multiple balls read as distinct. Kept in sync with the
+ * web analysis panel's role palette for a consistent visual language.
+ */
+const ROLE_VOICE_COLOR: Record<HitRole, string> = {
+  kick: '#ff6b6b',
+  bass: '#ffa94d',
+  snare: '#ffd43b',
+  percussion: '#63e6be',
+  melodic: '#4dabf7',
+};
+
+/** Fixed role order so per-role voices are produced deterministically. */
+const ROLE_ORDER: readonly HitRole[] = ['kick', 'bass', 'snare', 'percussion', 'melodic'];
+
+/**
+ * Launch-height fraction of the canvas, mirroring the pipeline's start-Y ratio
+ * (100/1080) so a single voice launches from the same height as the legacy
+ * single-ball path.
+ */
+const LAUNCH_Y_RATIO = 100 / 1080;
+
+/** Horizontal lane center (fraction of width) for the single/combined voice. */
+const CENTER_LANE_FRACTION = 0.5;
+
+function launchY(config: LayoutConfig): number {
+  return Math.round(config.canvasHeight * LAUNCH_Y_RATIO);
+}
+
+function laneX(fraction: number, config: LayoutConfig): number {
+  const x = Math.round(fraction * config.canvasWidth);
+  return Math.max(0, Math.min(config.canvasWidth, x));
+}
+
+/**
+ * Partition choreography targets into ball voices.
+ *
+ * - `'single'` (default): one voice containing every target, launched from
+ *   canvas center — byte-for-byte the current single-ball behavior.
+ * - `'per-role'`: one voice per {@link HitRole} present, each launched from its
+ *   role lane with a distinct tint. Targets without a role are grouped into one
+ *   neutral `other` voice; if NO target has a role (MIDI, `notes` mode), this
+ *   falls back to a single voice so nothing regresses.
+ *
+ * The input `targets` are not mutated; each voice receives a shallow copy of
+ * its slice, already time-sorted by the caller (`mapNotes`).
+ *
+ * @returns One or more {@link VoicePlan}s (never empty when `targets` is
+ *   non-empty; an empty input yields a single empty voice).
+ */
+export function planVoices(
+  targets: readonly ChoreographyTarget[],
+  grouping: VoiceGrouping,
+  config: LayoutConfig,
+): VoicePlan[] {
+  const y = launchY(config);
+
+  const singleVoice = (): VoicePlan[] => [
+    {
+      id: 'voice_all',
+      label: 'All hits',
+      colorHint: DEFAULT_VOICE_COLOR,
+      startPosition: [laneX(CENTER_LANE_FRACTION, config), y],
+      targets: [...targets],
+    },
+  ];
+
+  if (grouping === 'single') {
+    return singleVoice();
+  }
+
+  // per-role: bucket targets by role; role-less targets go to '__other__'.
+  const byRole = new Map<string, ChoreographyTarget[]>();
+  for (const target of targets) {
+    const key = target.role ?? '__other__';
+    const bucket = byRole.get(key);
+    if (bucket === undefined) {
+      byRole.set(key, [target]);
+    } else {
+      bucket.push(target);
+    }
+  }
+
+  // No roles at all → nothing to separate; behave exactly like single.
+  const hasAnyRole = ROLE_ORDER.some((role) => byRole.has(role));
+  if (!hasAnyRole) {
+    return singleVoice();
+  }
+
+  const voices: VoicePlan[] = [];
+  for (const role of ROLE_ORDER) {
+    const roleTargets = byRole.get(role);
+    if (roleTargets === undefined || roleTargets.length === 0) {
+      continue;
+    }
+    voices.push({
+      id: `voice_${role}`,
+      label: role.charAt(0).toUpperCase() + role.slice(1),
+      role,
+      colorHint: ROLE_VOICE_COLOR[role],
+      startPosition: [laneX(ROLE_LANE_POSITION[role], config), y],
+      targets: roleTargets,
+    });
+  }
+
+  const otherTargets = byRole.get('__other__');
+  if (otherTargets !== undefined && otherTargets.length > 0) {
+    voices.push({
+      id: 'voice_other',
+      label: 'Other',
+      colorHint: DEFAULT_VOICE_COLOR,
+      startPosition: [laneX(CENTER_LANE_FRACTION, config), y],
+      targets: otherTargets,
+    });
+  }
+
+  return voices;
 }

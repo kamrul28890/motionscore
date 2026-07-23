@@ -32,6 +32,7 @@ describe('parseArgs', () => {
       width: 1920,
       height: 1080,
       layout: 'piano-keys',
+      mode: 'auto',
       verbose: false,
     });
     expect(inputType).toBe('midi');
@@ -50,6 +51,8 @@ describe('parseArgs', () => {
       '720',
       '--layout',
       'lanes',
+      '--mode',
+      'onsets',
       '--verbose',
     ]);
 
@@ -60,6 +63,7 @@ describe('parseArgs', () => {
       width: 1280,
       height: 720,
       layout: 'lanes',
+      mode: 'onsets',
       verbose: true,
     });
     // Numeric flags must be numbers, not the raw argv strings.
@@ -79,6 +83,12 @@ describe('parseArgs', () => {
 
   it('rejects an invalid --layout choice', () => {
     expect(() => parseArgs(['song.mid', '-o', 'out.mp4', '--layout', 'spiral'])).toThrow(
+      CommanderError,
+    );
+  });
+
+  it('rejects an invalid --mode choice', () => {
+    expect(() => parseArgs(['song.mid', '-o', 'out.mp4', '--mode', 'melody'])).toThrow(
       CommanderError,
     );
   });

@@ -30,6 +30,10 @@ import {
   validateNoteEvents,
   validateChoreographyTargets,
   validateObjectTrajectory,
+  type AudioAnalysis,
+  type AudioAnalysisSummary,
+  type AudioEnergySample,
+  type HitRole,
   type NoteEvent,
   type ChoreographyTarget,
   type ObjectTrajectory,
@@ -37,7 +41,7 @@ import {
   type SolverConfig,
   type RenderConfig,
 } from '@motionscore/types';
-import { extract } from '@motionscore/note-extractor';
+import { extractWithAnalysis } from '@motionscore/note-extractor';
 import { mapNotes } from '@motionscore/musical-mapper';
 import { solveTrajectory } from '@motionscore/trajectory-solver';
 import { render, renderAndEncode } from '@motionscore/renderer';
@@ -64,6 +68,84 @@ export interface PipelineResult {
     /** Worst-case impact timing error across all hits, in milliseconds. */
     maxSyncErrorMs: number;
   };
+  /**
+   * Compact smart-analysis summary, present only for audio input analyzed with
+   * a rhythmic mode (`auto`/`smart`, `beats`, `onsets`). Absent for MIDI and
+   * `notes` transcription.
+   */
+  analysis?: AudioAnalysisSummary;
+}
+
+/** Cap on the downsampled energy timeline points carried in the summary. */
+const MAX_ENERGY_SAMPLES = 160;
+
+/** Project a full {@link AudioAnalysis} into the compact UI-facing summary. */
+function summarizeAnalysis(analysis: AudioAnalysis): AudioAnalysisSummary {
+  const roleCounts = { kick: 0, bass: 0, snare: 0, percussion: 0, melodic: 0 } as Record<
+    HitRole,
+    number
+  >;
+  for (const hit of analysis.hits) {
+    if (hit.role !== undefined) {
+      roleCounts[hit.role] += 1;
+    }
+  }
+  return {
+    mode: analysis.mode,
+    tempoBpm: analysis.tempoBpm,
+    durationSec: analysis.durationSec,
+    hitCount: analysis.hits.length,
+    roleCounts,
+    sectionCues: analysis.sectionCues,
+    energyTimeline: downsampleEnergy(analysis.featureFrames, MAX_ENERGY_SAMPLES),
+  };
+}
+
+/**
+ * Reduce 10 Hz feature frames to at most `maxSamples` averaged points so the
+ * timeline stays compact when serialized. Each point keeps the bucket's mean
+ * loudness/bass energy and a representative timestamp.
+ */
+function downsampleEnergy(
+  frames: readonly { timeSec: number; loudness: number; bassEnergy: number }[],
+  maxSamples: number,
+): AudioEnergySample[] {
+  if (frames.length === 0) {
+    return [];
+  }
+  if (frames.length <= maxSamples) {
+    return frames.map((frame) => ({
+      timeSec: frame.timeSec,
+      loudness: frame.loudness,
+      bassEnergy: frame.bassEnergy,
+    }));
+  }
+
+  const bucketSize = frames.length / maxSamples;
+  const samples: AudioEnergySample[] = [];
+  for (let i = 0; i < maxSamples; i += 1) {
+    const start = Math.floor(i * bucketSize);
+    const end = Math.min(frames.length, Math.floor((i + 1) * bucketSize));
+    let loudness = 0;
+    let bassEnergy = 0;
+    let count = 0;
+    for (let j = start; j < end; j += 1) {
+      const frame = frames[j]!;
+      loudness += frame.loudness;
+      bassEnergy += frame.bassEnergy;
+      count += 1;
+    }
+    if (count === 0) {
+      continue;
+    }
+    const midFrame = frames[Math.min(frames.length - 1, Math.floor((start + end) / 2))]!;
+    samples.push({
+      timeSec: midFrame.timeSec,
+      loudness: loudness / count,
+      bassEnergy: bassEnergy / count,
+    });
+  }
+  return samples;
 }
 
 // --- Pipeline-wide defaults ------------------------------------------------
@@ -172,6 +254,28 @@ function computeDurationSec(
   return Math.max(lastKeyframeTSec, lastNoteEndSec);
 }
 
+/** Keep rendering through the source tail after the final selected hit. */
+function extendTrajectoryToDuration(
+  trajectory: ObjectTrajectory,
+  durationSec: number,
+): ObjectTrajectory {
+  const last = trajectory.keyframes[trajectory.keyframes.length - 1];
+  if (last === undefined || !Number.isFinite(durationSec) || durationSec <= last.tSec) {
+    return trajectory;
+  }
+  return {
+    objectId: trajectory.objectId,
+    keyframes: [
+      ...trajectory.keyframes,
+      {
+        tSec: durationSec,
+        pos: [last.pos[0], last.pos[1]],
+        vel: [0, 0],
+      },
+    ],
+  };
+}
+
 /**
  * Run the complete MotionScore pipeline for a parsed CLI invocation.
  *
@@ -224,12 +328,14 @@ export async function runPipeline(parsed: ParsedArgs): Promise<PipelineResult> {
   stageDone(verbose, 'check input readable', startedAt, options.input);
 
     // --- Stage B: extract notes -------------------------------------------
-    // `extract` routes by file extension: MIDI is parsed directly; audio is
-    // transcribed to MIDI via Basic Pitch and then parsed through the same path
-    // (Req 7.1, 7.2). For audio input this stage's timing includes
-    // transcription, which can dominate the overall run.
+    // `extractWithAnalysis` routes MIDI directly, mixed audio through the
+    // smart/beats/onsets analyzer, and explicit notes mode through Basic Pitch.
+    // Rich analysis retains source duration so rendering can hold through the
+    // complete audio tail.
     startedAt = stageStart(verbose, 'extract notes (Stage B)');
-    const notes: NoteEvent[] = await extract(options.input);
+    const extraction = await extractWithAnalysis(options.input, { mode: options.mode });
+    const notes: NoteEvent[] = extraction.notes;
+    const analyzedDurationSec = extraction.audioAnalysis?.durationSec;
     stageDone(verbose, 'extract notes (Stage B)', startedAt, `${notes.length} notes`);
 
     // Stage B -> C boundary validation (Req 8.1).
@@ -262,7 +368,12 @@ export async function runPipeline(parsed: ParsedArgs): Promise<PipelineResult> {
       fps,
       syncToleranceMs: SYNC_TOLERANCE_MS,
     };
-    const trajectory: ObjectTrajectory = solveTrajectory(targets, solverConfig);
+    let trajectory: ObjectTrajectory = solveTrajectory(targets, solverConfig);
+    const requestedDurationSec = Math.max(
+      analyzedDurationSec ?? 0,
+      computeDurationSec(trajectory, notes),
+    );
+    trajectory = extendTrajectoryToDuration(trajectory, requestedDurationSec);
     const impactCount = trajectory.keyframes.filter((kf) => kf.hitsTarget !== undefined).length;
     stageDone(
       verbose,
@@ -320,7 +431,7 @@ export async function runPipeline(parsed: ParsedArgs): Promise<PipelineResult> {
     stageDone(verbose, 'render + encode (Stage E+F)', startedAt,
       `${streamResult.renderedFrames} frames → ${streamResult.outputPath}`);
 
-    return {
+    const result: PipelineResult = {
       outputPath: streamResult.outputPath,
       stats: {
         totalNotes: notes.length,
@@ -329,4 +440,8 @@ export async function runPipeline(parsed: ParsedArgs): Promise<PipelineResult> {
         maxSyncErrorMs: computeMaxSyncErrorMs(trajectory, targets),
       },
     };
+    if (extraction.audioAnalysis !== undefined) {
+      result.analysis = summarizeAnalysis(extraction.audioAnalysis);
+    }
+    return result;
 }

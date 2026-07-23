@@ -19,7 +19,7 @@ import { nanoid } from 'nanoid';
 
 import { runPipeline, detectInputType, type ParsedArgs } from '@motionscore/cli';
 import { detectAvailableEncoders } from '@motionscore/video-export';
-import type { CLIOptions } from '@motionscore/types';
+import type { AudioAnalysisSummary, CLIOptions } from '@motionscore/types';
 
 // ---------------------------------------------------------------------------
 // Auto-detect venv Python for Basic Pitch transcription
@@ -73,6 +73,7 @@ interface ProgressEvent {
   percent?: number;
   status?: 'complete' | 'error';
   stats?: Job['stats'];
+  analysis?: AudioAnalysisSummary;
   videoUrl?: string;
 }
 
@@ -99,22 +100,29 @@ const jobs = new Map<string, Job>();
 // Stage-to-percent mapping
 // ---------------------------------------------------------------------------
 
+// Percent shown when each verbose stage STARTS. Keys must match the exact
+// stage names emitted by the CLI pipeline's verbose logs (see pipeline.ts).
 const STAGE_PERCENT: Record<string, number> = {
-  'check input readable': 5,
-  'extract notes (Stage B)': 10,
-  'map notes (Stage C)': 20,
+  'check input readable': 3,
+  'extract notes (Stage B)': 8,
+  'map notes (Stage C)': 22,
   'solve trajectory (Stage D)': 30,
-  'check ffmpeg available': 35,
-  'render frames (Stage E)': 40,
-  'export video (Stage F)': 85,
+  'check ffmpeg available': 36,
+  'render + encode (Stage E+F)': 42,
 };
+
+/** The single streaming stage that dominates wall-clock time. */
+const RENDER_STAGE = 'render + encode (Stage E+F)';
+const RENDER_START_PERCENT = 42;
+const RENDER_END_PERCENT = 98;
 
 function estimatePercent(stageName: string, done: boolean): number {
   const base = STAGE_PERCENT[stageName];
   if (base === undefined) return 0;
-  if (done && stageName === 'export video (Stage F)') return 95;
   if (done) {
-    // Return the next stage's starting percent
+    // The render+encode stage is last; keep the bar near the top when it
+    // finishes rather than snapping back to its start percent.
+    if (stageName === RENDER_STAGE) return RENDER_END_PERCENT;
     const stages = Object.keys(STAGE_PERCENT);
     const idx = stages.indexOf(stageName);
     if (idx >= 0 && idx < stages.length - 1) {
@@ -176,13 +184,19 @@ function parseProgressLine(line: string): ProgressEvent {
     return { message: validateMatch[1] };
   }
 
-  // Pattern: [motionscore] export progress: N frames encoded
-  const exportMatch = line.match(/\[motionscore\] export progress: (\d+) frames encoded$/);
-  if (exportMatch) {
+  // Pattern: [motionscore] render+encode progress: N/M frames
+  const renderMatch = line.match(/\[motionscore\] render\+encode progress: (\d+)\/(\d+) frames$/);
+  if (renderMatch) {
+    const rendered = parseInt(renderMatch[1]!, 10);
+    const total = parseInt(renderMatch[2]!, 10);
+    const fraction = total > 0 ? Math.min(1, rendered / total) : 0;
+    const percent = Math.round(
+      RENDER_START_PERCENT + fraction * (RENDER_END_PERCENT - RENDER_START_PERCENT),
+    );
     return {
-      stage: 'export video (Stage F)',
-      message: `Encoding: ${exportMatch[1]} frames encoded`,
-      percent: 85,
+      stage: RENDER_STAGE,
+      message: `Rendering: ${rendered}/${total} frames`,
+      percent,
     };
   }
 
@@ -271,6 +285,8 @@ app.post('/api/generate', upload.single('file'), async (req: Request, res: Respo
   const width = req.body.width ? parseInt(req.body.width, 10) : 1920;
   const height = req.body.height ? parseInt(req.body.height, 10) : 1080;
   const layout = req.body.layout === 'lanes' ? 'lanes' : 'piano-keys';
+  const ALLOWED_MODES = ['auto', 'beats', 'onsets', 'notes'];
+  const mode = ALLOWED_MODES.includes(req.body.mode) ? req.body.mode : 'auto';
   const codec = req.body.codec || undefined;
   const gpuDevice = req.body.gpuDevice !== undefined ? parseInt(req.body.gpuDevice, 10) : undefined;
   const preset = req.body.preset || undefined;
@@ -308,6 +324,7 @@ app.post('/api/generate', upload.single('file'), async (req: Request, res: Respo
     const options: CLIOptions = {
       input: inputPath,
       output: outputPath,
+      mode,
       fps,
       width,
       height,
@@ -332,6 +349,7 @@ app.post('/api/generate', upload.single('file'), async (req: Request, res: Respo
       emitToJob(job, {
         status: 'complete',
         stats: result.stats,
+        analysis: result.analysis,
         videoUrl: `/api/video/${jobId}`,
         message: 'Pipeline complete',
         percent: 100,

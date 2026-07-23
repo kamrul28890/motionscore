@@ -283,3 +283,101 @@ describe('musical mapper — examples and edge cases', () => {
     expect(mapNotes([], config)).toEqual([]);
   });
 });
+
+// --- planVoices (multi-ball voice planning, Phase 1) ------------------------
+
+import { planVoices } from './index.js';
+import type { ChoreographyTarget, HitRole } from '@motionscore/types';
+
+/** Minimal layout config for voice-planning tests. */
+const voiceLayout: LayoutConfig = {
+  type: 'lanes',
+  canvasWidth: 1920,
+  canvasHeight: 1080,
+  targetY: 900,
+};
+
+/** Build a ChoreographyTarget with an optional role at a given time. */
+function target(noteId: string, timeSec: number, role?: HitRole): ChoreographyTarget {
+  const t: ChoreographyTarget = {
+    noteId,
+    timeSec,
+    position: { x: 960, y: 900 },
+    impactSize: 0.5,
+    colorHint: '#4477ff',
+  };
+  if (role !== undefined) t.role = role;
+  return t;
+}
+
+describe('planVoices — voice partitioning (multi-ball Phase 1)', () => {
+  it('single grouping yields one voice containing every target', () => {
+    const targets = [target('n0001', 0.5, 'kick'), target('n0002', 1.0, 'snare')];
+    const voices = planVoices(targets, 'single', voiceLayout);
+
+    expect(voices).toHaveLength(1);
+    expect(voices[0]!.id).toBe('voice_all');
+    expect(voices[0]!.targets).toHaveLength(2);
+    expect(voices[0]!.role).toBeUndefined();
+    // Launched from canvas center, near the top (mirrors the legacy start).
+    expect(voices[0]!.startPosition[0]).toBe(960);
+    expect(voices[0]!.startPosition[1]).toBe(Math.round(1080 * (100 / 1080)));
+  });
+
+  it('per-role grouping produces one voice per distinct role, in fixed order', () => {
+    const targets = [
+      target('n0001', 0.5, 'snare'),
+      target('n0002', 0.5, 'kick'),
+      target('n0003', 1.0, 'kick'),
+      target('n0004', 1.5, 'melodic'),
+    ];
+    const voices = planVoices(targets, 'per-role', voiceLayout);
+
+    // kick, snare, melodic present → 3 voices, ordered kick < snare < melodic.
+    expect(voices.map((v) => v.role)).toEqual(['kick', 'snare', 'melodic']);
+    const kick = voices.find((v) => v.role === 'kick')!;
+    expect(kick.targets.map((t) => t.noteId)).toEqual(['n0002', 'n0003']);
+    // Distinct tints and distinct launch lanes per role.
+    const xs = voices.map((v) => v.startPosition[0]);
+    expect(new Set(xs).size).toBe(voices.length);
+    expect(new Set(voices.map((v) => v.colorHint)).size).toBe(voices.length);
+  });
+
+  it('per-role falls back to a single voice when no target has a role (MIDI)', () => {
+    const targets = [target('n0001', 0.5), target('n0002', 1.0)];
+    const voices = planVoices(targets, 'per-role', voiceLayout);
+
+    expect(voices).toHaveLength(1);
+    expect(voices[0]!.id).toBe('voice_all');
+  });
+
+  it('per-role routes role-less targets into a single neutral "other" voice', () => {
+    const targets = [target('n0001', 0.5, 'kick'), target('n0002', 1.0)];
+    const voices = planVoices(targets, 'per-role', voiceLayout);
+
+    expect(voices.map((v) => v.id).sort()).toEqual(['voice_kick', 'voice_other']);
+    const other = voices.find((v) => v.id === 'voice_other')!;
+    expect(other.role).toBeUndefined();
+    expect(other.targets.map((t) => t.noteId)).toEqual(['n0002']);
+  });
+
+  it('does not mutate the input targets and preserves every target exactly once', () => {
+    const targets = [
+      target('n0001', 0.5, 'kick'),
+      target('n0002', 1.0, 'bass'),
+      target('n0003', 1.5, 'kick'),
+    ];
+    const before = JSON.stringify(targets);
+    const voices = planVoices(targets, 'per-role', voiceLayout);
+
+    expect(JSON.stringify(targets)).toBe(before);
+    const distributed = voices.flatMap((v) => v.targets.map((t) => t.noteId)).sort();
+    expect(distributed).toEqual(['n0001', 'n0002', 'n0003']);
+  });
+
+  it('handles empty input as one empty voice', () => {
+    const voices = planVoices([], 'per-role', voiceLayout);
+    expect(voices).toHaveLength(1);
+    expect(voices[0]!.targets).toHaveLength(0);
+  });
+});

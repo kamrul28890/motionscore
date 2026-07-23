@@ -1,20 +1,25 @@
-// Tests for the format-routing note extractor `extract` (task 11.2).
+// Tests for the format-routing note extractor `extract`.
 //
-// `extract` is the top-level Stage B entry point. It routes by file extension:
-//   - MIDI (.mid/.midi) → parsed directly via parseMidi
-//   - audio (.wav/.mp3/.flac/.ogg) → transcribed to MIDI (Basic Pitch) then parsed
+// `extract` is the top-level Stage B entry point. It routes by file extension
+// and, for audio, by extraction `mode`:
+//   - MIDI (.mid/.midi) → parsed directly via parseMidi (mode ignored)
+//   - audio (.wav/.mp3/.flac/.ogg):
+//       * 'beats' / 'onsets' (and 'auto', the default → smart) → librosa
+//         rhythmic analysis (analyzeAudioEvents)
+//       * 'notes' → full Basic Pitch transcription → parseMidi
 //   - anything else → InputError listing supported formats
 // and validates the resulting NoteEvents against the shared data contract so
-// transcription output is held to the same guarantees as direct MIDI (Req 7.5).
+// every path is held to the same guarantees as direct MIDI (Req 7.5).
 //
-// These tests are HERMETIC — they do NOT require Basic Pitch (or a working
-// Python) to be installed:
+// These tests are HERMETIC — they do NOT require librosa or Basic Pitch to be
+// installed:
 //   - The MIDI path is exercised with an in-memory MIDI file synthesized via
 //     @tonejs/midi's write API (mirrors index.test.ts).
-//   - The audio path's wiring is confirmed by pointing the PYTHON env var at a
-//     bogus executable so transcribeAudio fails fast with ENOENT; `extract`
-//     must surface that as a TranscriptionError, proving the .wav branch calls
-//     the transcriber (no Basic Pitch needed).
+//   - Each audio branch's wiring is confirmed by pointing the PYTHON env var at
+//     a bogus executable so the subprocess fails fast with ENOENT; `extract`
+//     must surface that as a TranscriptionError. The DISTINCT error guidance of
+//     each branch (Basic Pitch vs. the librosa setup script) proves `notes`
+//     routes to transcription while the default routes to smart analysis.
 //
 // Sources are imported from `./index.js` so tests run against the current
 // TypeScript, not a possibly-stale `dist/`.
@@ -28,7 +33,7 @@ import { join } from 'node:path';
 import midiModule from '@tonejs/midi';
 import { InputError, TranscriptionError } from '@motionscore/types';
 
-import { extract } from './index.js';
+import { extract, type ExtractOptions } from './index.js';
 
 const { Midi } = midiModule;
 
@@ -53,9 +58,9 @@ function buildMidiBytes(): Uint8Array {
 }
 
 /** Run `extract` and return the thrown error (fails if it resolves instead). */
-async function captureError(inputPath: string): Promise<unknown> {
+async function captureError(inputPath: string, options?: ExtractOptions): Promise<unknown> {
   try {
-    await extract(inputPath);
+    await extract(inputPath, options);
   } catch (error) {
     return error;
   }
@@ -124,6 +129,10 @@ describe('extract — unsupported extension', () => {
 });
 
 describe('extract — audio routing (Requirements 7.1, 7.3)', () => {
+  // A path that cannot resolve to any real executable → spawn emits ENOENT, so
+  // the subprocess fails fast without needing librosa or Basic Pitch installed.
+  const BOGUS_PYTHON = 'motionscore-nonexistent-python-executable-3a2b1c';
+
   // Restore whatever PYTHON override existed before each test mutated it.
   const originalPython = process.env[PYTHON_ENV_VAR];
   afterEach(() => {
@@ -134,17 +143,37 @@ describe('extract — audio routing (Requirements 7.1, 7.3)', () => {
     }
   });
 
-  it('routes .wav to the transcriber and surfaces TranscriptionError when Basic Pitch is unavailable', async () => {
-    // A path that cannot resolve to any real executable → spawn emits ENOENT,
-    // so transcribeAudio fails fast without needing Basic Pitch installed. That
-    // `extract('foo.wav')` rejects with a TranscriptionError proves the audio
-    // branch actually invokes the transcriber.
-    process.env[PYTHON_ENV_VAR] = 'motionscore-nonexistent-python-executable-3a2b1c';
+  it('routes notes mode to Basic Pitch and surfaces its install guidance when unavailable', async () => {
+    process.env[PYTHON_ENV_VAR] = BOGUS_PYTHON;
 
+    const error = await captureError('foo.wav', { mode: 'notes' });
+
+    expect(error).toBeInstanceOf(TranscriptionError);
+    // The transcription path points the user at the Basic Pitch package (Req 7.3).
+    expect((error as TranscriptionError).message).toContain('pip install basic-pitch');
+  });
+
+  it('routes beats mode to the librosa analyzer and surfaces its setup guidance when unavailable', async () => {
+    process.env[PYTHON_ENV_VAR] = BOGUS_PYTHON;
+
+    const error = await captureError('foo.wav', { mode: 'beats' });
+
+    expect(error).toBeInstanceOf(TranscriptionError);
+    const message = (error as TranscriptionError).message;
+    // The rhythmic path points the user at the venv setup script (distinct from
+    // the Basic Pitch guidance), proving beats routes to librosa, not transcription.
+    expect(message.toLowerCase()).toContain('python');
+    expect(message).toContain('setup-audio');
+  });
+
+  it('defaults audio input to the smart analyzer (not full transcription)', async () => {
+    process.env[PYTHON_ENV_VAR] = BOGUS_PYTHON;
+
+    // No mode supplied → 'auto' → smart for audio. The lightweight librosa
+    // setup guidance (not Basic Pitch guidance) confirms the analyzer branch.
     const error = await captureError('foo.wav');
 
     expect(error).toBeInstanceOf(TranscriptionError);
-    // Install guidance for the Basic Pitch package is surfaced (Req 7.3).
-    expect((error as TranscriptionError).message).toContain('pip install basic-pitch');
+    expect((error as TranscriptionError).message).toContain('setup-audio');
   });
 });

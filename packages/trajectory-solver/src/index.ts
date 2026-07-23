@@ -10,3 +10,4 @@
 
 export { computeBallisticArc, type BallisticArc } from './ballistic.js';
 export { solveTrajectory } from './solve.js';
+export { solveChoreography } from './choreography.js';

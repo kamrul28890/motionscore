@@ -26,9 +26,15 @@ export function ProgressDisplay({ events }: ProgressDisplayProps) {
     }
   }, [events]);
 
-  const lastEvent = events[events.length - 1];
-  const percent = lastEvent?.percent ?? 0;
-  const currentStage = lastEvent?.stage ?? 'Initializing';
+  // Use the most recent event that actually carries a value, so interleaved
+  // messages without a percent/stage (e.g. "validated ...") don't reset the bar
+  // to 0 or blank the current stage label.
+  let percent = 0;
+  let currentStage = 'Initializing';
+  for (const event of events) {
+    if (event.percent !== undefined) percent = Math.max(percent, event.percent);
+    if (event.stage !== undefined) currentStage = event.stage;
+  }
 
   const formatTime = (secs: number): string => {
     const m = Math.floor(secs / 60);

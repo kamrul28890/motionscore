@@ -64,37 +64,48 @@ reassigned independently.
 
 ### Stage B — Note/Event Extraction
 
-**Purpose:** convert input into symbolic note events: pitch, onset, duration,
-velocity, instrument/track.
+**Purpose:** convert input into physically hittable musical events. MIDI retains exact
+notes; mixed audio produces a role-labelled salient hit track plus continuous
+features and structural section cues.
 
 **Rules:**
-- If input is already MIDI, parse it directly. Do not run it through an
-  audio transcription model. Direct parsing is exact; transcription is
-  always an approximation. Prefer sourcing MIDI directly (piano cover MIDIs
-  are widely available) over transcribing audio whenever possible.
-- If input is raw audio, run an audio-to-MIDI transcription model. Candidate
-  options and how to choose between them are tracked in `RESEARCH_NOTES.md`
-  §1 — that file is the living source of truth on which model to use,
-  because this space is moving fast and licensing terms matter (see the
-  licensing flag on MuScriptor in that doc — non-commercial license, do not
-  wire in as a default without checking status first).
-- If the source is a full mix (not solo instrument), consider a source
-  separation pass (e.g. Demucs) before transcription, then transcribe each
-  stem independently for cleaner note streams.
-- Only pitch/rhythm accuracy matters here — do not let this stage make any
-  decision about layout, color, or visual style.
+- If input is already MIDI, parse it directly. Do not run it through an audio
+  model. Direct parsing is exact.
+- Mixed audio defaults to the smart analyzer, not full note transcription. It
+  uses librosa HPSS plus independent low/mid/high onset envelopes to approximate
+  percussive, bass, and harmonic stems. Candidate attacks are assigned roles,
+  ranked by salience, merged when simultaneous, and suppressed when repetitive.
+- Keep `beats` as a sparse metrical comparison mode and `onsets` as a denser
+  full-mix comparison mode. Beat tracking alone omits fills and syncopation;
+  raw onsets alone do not distinguish musical importance.
+- Keep Basic Pitch as explicit `notes` mode for sparse solo/pitched recordings.
+  It is intentionally not the mixed-song default because polyphonic notes and
+  chords create too many targets for one physical object.
+- True neural source separation (Demucs or a maintained equivalent) is an
+  optional future high-quality mode. It must feed the same role/onset selector;
+  every spike from every stem must never become a hit automatically.
+- Discrete ball hits and longer scene controls are separate outputs. Loudness,
+  bass energy, brightness, onset density, and harmonic/percussive energy are
+  sampled at 10 Hz; builds, drops, breakdowns, rises, and falls are emitted as
+  section cues with confidence. These do not create extra ball impacts.
 
-**Build vs. use:** use an existing model/library. Do not train a
-transcription model from scratch — out of scope, multi-year research effort.
+**Build vs. use:** use mature librosa DSP primitives; build only the project-
+specific salience, merging, trend detection, and physical-reachability policy.
+Do not train a transcription or source-separation model from scratch.
 
-**Output:** `NoteEvent[]` — see §7.1.
+**Output:** `NoteEvent[]` for the existing pipeline, or rich `AudioAnalysis`
+(`hits`, `featureFrames`, `sectionCues`) for analysis UI/future renderers.
+
+**Implementation reference:** the concrete algorithm, JSON schema, tuning
+constants, limits, and web integration are documented in `AUDIO_ANALYSIS.md`.
 
 ### Stage C — Musical Mapping
 
-**Purpose:** decide which notes actually get a physical "hit" (e.g. keep
-melody, drop dense accompaniment/chords if too fast for physical timing to
-sell), map pitch → lane/x-position/color, map velocity → visual impact size,
-define the physical layout (piano key positions, lane count, obstacle map).
+**Purpose:** map retained events to lane/x-position/color and impact size, then
+stabilize analyzer-generated target positions so short event gaps cannot demand
+full-screen lateral jumps. MIDI pitch mapping remains exact; audio hit roles and
+position hints are choreography controls rather than literal transcription.
+Define the physical layout (piano key positions, lanes, obstacle map) here.
 
 **Build vs. use:** build. This is bespoke creative/business logic specific to
 the aesthetic being targeted, not a solved problem elsewhere. Keep it
@@ -221,7 +232,9 @@ solid — see roadmap, §8):
 
 | Stage | Decision | Rationale |
 |---|---|---|
-| B — Transcription | **Use existing model.** Default candidate + alternatives tracked in `RESEARCH_NOTES.md` §1 (this list changes fast; check there before hardcoding a choice). | Training a transcription model from scratch is out of scope. |
+| B — Mixed-audio events | **Use librosa DSP + custom selection.** HPSS/multi-band onsets provide pseudo-stems; project code ranks, merges, labels, and suppresses hits. | Mature signal processing without a heavyweight model; selection is choreography-specific. |
+| B — Full note transcription | **Use Basic Pitch only in explicit `notes` mode.** | Useful for sparse pitched recordings, too dense as the mixed-song default. |
+| B — Neural stems | **Optional future adapter.** Evaluate a maintained Demucs-compatible tool before pinning a model. | Higher isolation quality, but large dependencies/model downloads and slower preprocessing. |
 | C — Musical mapping | **Build.** | Bespoke creative logic, not a solved external problem. |
 | D — Trajectory solver | **Build.** | Core IP. No existing tool solves timed-arrival physics choreography. |
 | E — Physics simulation | **Use existing engine** (see `RESEARCH_NOTES.md` §4 for shortlist). Custom minimal solver only as fallback for one specific object/collision type. | Rigid-body physics is a solved, hard-to-outperform problem. |
@@ -269,12 +282,60 @@ silently break older generated content or cached intermediate files.
       "startSec": 1.203,
       "endSec": 1.560,
       "velocity": 0.82,
+      "source": "audio",
+      "role": "kick|bass|snare|percussion|melodic",
+      "confidence": 0.91,
+      "salience": 0.88,
       "track": "melody",
       "instrument": "piano"
     }
   ]
 }
 ```
+
+For mixed audio, `pitchMidi` is a stable horizontal-position hint derived from
+the event role rather than a claim that a drum transient has a literal pitch.
+`source`, `role`, `confidence`, and `salience` are optional so direct MIDI remains
+backward-compatible. The mapper activates audio-only lane/slew hints only when
+`source` is explicitly `audio`; a role-labelled MIDI event keeps exact pitch
+placement.
+
+### 7.1b `AudioAnalysis` — rich mixed-audio output
+
+```json
+{
+  "version": 1,
+  "durationSec": 182.4,
+  "tempoBpm": 128.0,
+  "mode": "smart",
+  "hits": ["NoteEvent", "..."],
+  "featureFrames": [
+    {
+      "timeSec": 0.1,
+      "loudness": 0.54,
+      "bassEnergy": 0.61,
+      "brightness": 0.42,
+      "onsetDensity": 0.35,
+      "harmonicEnergy": 0.48,
+      "percussiveEnergy": 0.67
+    }
+  ],
+  "sectionCues": [
+    {
+      "type": "build|drop|breakdown|rise|fall",
+      "startSec": 40.0,
+      "endSec": 44.2,
+      "peakSec": 44.2,
+      "intensity": 0.89,
+      "confidence": 0.84
+    }
+  ]
+}
+```
+
+`featureFrames` and `sectionCues` are intentionally not encoded as ball hits.
+They are future renderer inputs for camera motion, vibration, long pre-drop
+movement, lighting, particles, and environment deformation.
 
 ### 7.2 `ChoreographyTarget[]` — output of Stage C
 
@@ -291,7 +352,8 @@ silently break older generated content or cached intermediate files.
       "timeSec": 1.203,
       "position": { "x": 120, "y": 0 },
       "impactSize": 0.82,
-      "colorHint": "#4477ff"
+      "colorHint": "#4477ff",
+      "role": "kick"
     }
   ]
 }
@@ -325,9 +387,13 @@ render. It does not need to know how the trajectory was computed.
   `NoteEvent[]` → naive Stage C (one lane per pitch range) → closed-form
   ballistic Stage D → minimal 2D renderer (plain shapes, no art direction).
   Goal: prove hits land exactly on time. No aesthetics yet.
-- **M2 — Audio input.** Wire in the chosen transcription model (per
-  `RESEARCH_NOTES.md` §1). Validate on 2-3 real songs, check transcription
-  quality is good enough for the mapping stage.
+- **M2 — Audio input.** Smart librosa HPSS/multi-band hit analysis is the
+  default; beat, onset, and optional Basic Pitch note modes remain available.
+  Continuous feature frames and structural cues are produced for future scene
+  control. Validate and tune thresholds on a diverse real-song corpus.
+- **M2.1 — High-quality stems (optional).** Benchmark a maintained neural stem
+  separator against the lightweight default. Add it only when the hit-selection
+  improvement justifies model downloads, runtime, and deployment complexity.
 - **M3 — Aesthetic pass.** Swap in the chosen physics engine, add
   camera/particles/trails/color (Stage F), ffmpeg export with muxed audio.
   This is where the project starts looking like the reference videos.

@@ -22,6 +22,15 @@ export interface CLIOptions {
   gravity?: number;
   /** Layout strategy for placing targets. */
   layout?: 'piano-keys' | 'lanes';
+  /**
+   * How audio input is turned into hittable events (ignored for MIDI, which is
+   * always parsed as discrete notes):
+   * - `'auto'` (default): smart HPSS + frequency-band attack fusion.
+   * - `'beats'`: the metrical pulse (sparse; may omit fills/syncopation).
+   * - `'onsets'`: full-mix attacks without stem-aware salience filtering.
+   * - `'notes'`: full pitched transcription via Basic Pitch (very dense).
+   */
+  mode?: 'auto' | 'notes' | 'beats' | 'onsets';
   /** When true, print per-stage progress information. */
   verbose?: boolean;
   /**

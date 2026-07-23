@@ -12,8 +12,10 @@ coverage/
 tmp/
 *.log
 
-# Python virtual environment
+# Python virtual environment / bytecode
 .venv/
+__pycache__/
+*.py[cod]
 
 # Editor / OS
 .DS_Store

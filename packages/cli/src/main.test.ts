@@ -59,24 +59,48 @@ describe('main', () => {
     expect(stderrText()).toContain('does not exist or is not readable');
   });
 
-  it('returns 1 and surfaces Basic Pitch install guidance when audio transcription is unavailable', async () => {
-    // Audio input is now wired to Basic Pitch transcription (task 11.2), no
-    // longer rejected outright. Force the transcriber's Python executable to a
-    // bogus name so it fails fast (spawn ENOENT) regardless of whether Python /
-    // Basic Pitch is installed — this keeps the test hermetic while proving the
-    // audio branch reaches transcription and its failure surfaces as exit 1.
+  it('returns 1 and surfaces Basic Pitch install guidance for audio in notes mode when unavailable', async () => {
+    // `--mode notes` forces the Basic Pitch transcription path. Force the
+    // Python executable to a bogus name so it fails fast (spawn ENOENT)
+    // regardless of what is installed — hermetic, and proves the notes path
+    // reaches transcription and surfaces its guidance as exit 1.
     const PYTHON_ENV_VAR = 'PYTHON';
     const originalPython = process.env[PYTHON_ENV_VAR];
     process.env[PYTHON_ENV_VAR] = 'motionscore-nonexistent-python-executable-7d6e5f';
     const dir = await mkdtemp(join(tmpdir(), 'motionscore-main-'));
     try {
       const wav = join(dir, 'song.wav');
-      // Contents are irrelevant: transcription fails before any decode.
+      // Contents are irrelevant: analysis fails before any decode.
       await writeFile(wav, 'placeholder: readability check only, not decoded');
-      const code = await main([wav, '-o', join(dir, 'out.mp4')]);
+      const code = await main([wav, '-o', join(dir, 'out.mp4'), '--mode', 'notes']);
       expect(code).toBe(1);
       // The failure is a transcription error carrying Basic Pitch install guidance.
       expect(stderrText()).toContain('pip install basic-pitch');
+    } finally {
+      if (originalPython === undefined) {
+        delete process.env[PYTHON_ENV_VAR];
+      } else {
+        process.env[PYTHON_ENV_VAR] = originalPython;
+      }
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns 1 with setup guidance for audio in the default smart mode when the analyzer is unavailable', async () => {
+    // With no --mode, audio defaults to the librosa smart analyzer. A bogus
+    // Python makes it fail fast (ENOENT); the error should point at the
+    // lightweight analysis setup rather than Basic Pitch, confirming the
+    // default routes to smart analysis (not transcription).
+    const PYTHON_ENV_VAR = 'PYTHON';
+    const originalPython = process.env[PYTHON_ENV_VAR];
+    process.env[PYTHON_ENV_VAR] = 'motionscore-nonexistent-python-executable-7d6e5f';
+    const dir = await mkdtemp(join(tmpdir(), 'motionscore-main-'));
+    try {
+      const wav = join(dir, 'song.wav');
+      await writeFile(wav, 'placeholder: readability check only, not decoded');
+      const code = await main([wav, '-o', join(dir, 'out.mp4')]);
+      expect(code).toBe(1);
+      expect(stderrText()).toContain('setup-audio');
     } finally {
       if (originalPython === undefined) {
         delete process.env[PYTHON_ENV_VAR];

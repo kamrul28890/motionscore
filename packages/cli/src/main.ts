@@ -76,7 +76,7 @@ function handleParseError(err: unknown): number {
 
 /** Print the success summary statistics to stdout (Req 1.3). */
 function printSummary(result: PipelineResult): void {
-  const { outputPath, stats } = result;
+  const { outputPath, stats, analysis } = result;
   const lines = [
     `Done. Wrote ${outputPath}`,
     `  Total notes:     ${stats.totalNotes}`,
@@ -84,6 +84,28 @@ function printSummary(result: PipelineResult): void {
     `  Duration:        ${stats.durationSec.toFixed(2)}s`,
     `  Max sync error:  ${stats.maxSyncErrorMs.toFixed(2)}ms`,
   ];
+
+  if (analysis !== undefined) {
+    const roles = (Object.entries(analysis.roleCounts) as [string, number][])
+      .filter(([, count]) => count > 0)
+      .map(([role, count]) => `${role} ${count}`)
+      .join(', ');
+    lines.push(
+      `  Analysis:        ${analysis.mode}, ${analysis.tempoBpm.toFixed(1)} BPM, ${analysis.hitCount} hits`,
+    );
+    if (roles.length > 0) {
+      lines.push(`  Roles:           ${roles}`);
+    }
+    if (analysis.sectionCues.length > 0) {
+      const cueCounts = new Map<string, number>();
+      for (const cue of analysis.sectionCues) {
+        cueCounts.set(cue.type, (cueCounts.get(cue.type) ?? 0) + 1);
+      }
+      const cues = [...cueCounts.entries()].map(([type, count]) => `${count} ${type}`).join(', ');
+      lines.push(`  Section cues:    ${cues}`);
+    }
+  }
+
   process.stdout.write(`${lines.join('\n')}\n`);
 }
 

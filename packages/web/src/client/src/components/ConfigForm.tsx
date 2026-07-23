@@ -75,6 +75,24 @@ export function ConfigForm({ options, onChange, onGenerate, disabled, canGenerat
         ))}
       </div>
 
+      <label className="form-field form-field-wide">
+        <span className="form-label">What the ball hits</span>
+        <select
+          value={options.mode}
+          onChange={(e) => update({ mode: e.target.value as GenerateOptions['mode'] })}
+          disabled={disabled}
+        >
+          <option value="auto">Auto — smart instrument-aware hits (recommended)</option>
+          <option value="beats">Beats — metrical pulse (can miss fills)</option>
+          <option value="onsets">Onsets — all full-mix attacks</option>
+          <option value="notes">Notes — full transcription (most hits)</option>
+        </select>
+        <span className="form-hint">
+          Auto separates harmonic/percussive frequency layers, keeps salient attacks,
+          and merges simultaneous hits. MIDI files always use their original notes.
+        </span>
+      </label>
+
       <div className="form-grid">
         <label className="form-field">
           <span className="form-label">FPS</span>

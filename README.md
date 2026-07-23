@@ -1,6 +1,6 @@
 # MotionScore
 
-A music-to-physics video generator. Feed it a MIDI file (or audio, with Basic Pitch installed) and it produces an H.264 MP4 where a ball moves under realistic gravity, striking targets in exact sync with every note. Available as both a CLI tool and a web application.
+A music-to-physics video generator. Feed it MIDI or a mixed audio song and it produces an H.264 MP4 where a ball moves under gravity, striking musically salient targets in sync. Audio defaults to smart harmonic/percussive and frequency-band attack analysis; full Basic Pitch transcription remains optional for sparse solo recordings. Available as both a CLI tool and a web application.
 
 ## Quick Start
 
@@ -70,23 +70,31 @@ The server cleans up temporary files (uploads + outputs) after 30 minutes.
 
 - **Node.js** >= 22.12 (tested on Node 26)
 - **ffmpeg** on PATH ([download](https://ffmpeg.org/download.html)) — required for video export
-- **Python 3 + Basic Pitch** (optional) — only needed for audio input (`.wav`/`.mp3`/`.flac`/`.ogg`)
+- **Python 3 + librosa** — needed for the default smart/beats/onsets audio modes
+- **Basic Pitch** (optional) — needed only for `--mode notes` full transcription
 
-### Setting up Basic Pitch (audio support)
+Smart/beats/onsets analysis currently accepts up to 12 minutes per file to bound decoded-audio and HPSS memory. Split longer mixes before processing.
 
-Basic Pitch has specific dependency constraints, so it's installed in a virtual environment. A setup script handles everything:
+> For a full reference on the audio analysis subsystem (smart stem-aware modes,
+> JSON schema, roles/salience, feature frames, section cues, and web
+> integration) see [`docs/AUDIO_ANALYSIS.md`](docs/AUDIO_ANALYSIS.md). The
+> multi-ball roadmap is in [`docs/MULTI_BALL_PLAN.md`](docs/MULTI_BALL_PLAN.md).
+
+### Setting up Python audio analysis
+
+The setup script creates a project virtual environment and installs librosa plus the optional Basic Pitch transcription stack:
 
 ```powershell
 # Windows (PowerShell)
-.\scripts\setup-basic-pitch.ps1
+.\scripts\setup-audio.ps1
 ```
 
 ```bash
 # macOS / Linux
-./scripts/setup-basic-pitch.sh
+./scripts/setup-audio.sh
 ```
 
-This creates a `.venv/` in the project root with Basic Pitch and its dependencies. After setup, point the `PYTHON` environment variable at the venv's Python executable so the transcription subprocess uses it:
+This creates a `.venv/` in the project root with librosa and its dependencies. After setup, point the `PYTHON` environment variable at the venv's Python executable so the analyzer subprocess uses it:
 
 ```powershell
 # Windows — set before running
@@ -104,14 +112,17 @@ Or add a `.env` file at the project root:
 PYTHON=.venv/Scripts/python.exe
 ```
 
-**What the setup script installs (if you prefer manual):**
+**Optional full note transcription:** `--mode notes` additionally requires Basic Pitch. Run `scripts/setup-basic-pitch.ps1` (Windows) or `scripts/setup-basic-pitch.sh` (macOS/Linux); it reuses the same `.venv`.
+
+**Manual equivalent for the lightweight analyzer:**
 
 ```bash
 python -m venv .venv
-.venv/Scripts/python -m pip install --upgrade pip "setuptools<71" wheel
-.venv/Scripts/pip install "basic-pitch[onnx]==0.4.0" --no-deps
-.venv/Scripts/pip install librosa mir-eval numpy pretty-midi "resampy<0.4.3" scikit-learn scipy typing-extensions onnxruntime
+.venv/Scripts/python -m pip install --upgrade pip
+.venv/Scripts/python -m pip install "librosa==0.11.0"
 ```
+
+The Basic Pitch setup script installs its pinned package plus ONNX/transcription dependencies.
 
 ## CLI Usage
 
@@ -129,6 +140,7 @@ Options:
   --width <number>        video width in pixels (default: 1920)
   --height <number>       video height in pixels (default: 1080)
   --layout <type>         target layout strategy (choices: "piano-keys", "lanes", default: "piano-keys")
+  --mode <mode>           audio hit selection: "auto", "beats", "onsets", or "notes" (default: "auto")
   --verbose               print progress information for each pipeline stage
   -h, --help              display help for command
 ```
@@ -142,8 +154,13 @@ npx motionscore song.mid -o video.mp4
 # Lower resolution for faster rendering
 npx motionscore song.mid -o video.mp4 --width 640 --height 360 --fps 30
 
-# Audio input (requires Basic Pitch)
-npx motionscore recording.wav -o video.mp4
+# Mixed song: smart stem-aware attacks (default/recommended)
+npx motionscore song.wav -o video.mp4
+
+# Comparison modes
+npx motionscore song.wav -o beats.mp4 --mode beats     # sparse metrical pulse
+npx motionscore song.wav -o onsets.mp4 --mode onsets   # all full-mix attacks
+npx motionscore solo.wav -o notes.mp4 --mode notes     # Basic Pitch transcription
 
 # Verbose output showing per-stage timing
 npx motionscore song.mid -o video.mp4 --verbose
@@ -170,7 +187,7 @@ This is a TypeScript monorepo using npm workspaces and `tsc -b` (project referen
 ```
 packages/
   types/              Shared data contracts, config interfaces, error classes, validators
-  note-extractor/     Stage B: MIDI parsing + Basic Pitch audio transcription
+  note-extractor/     Stage B: MIDI parsing, smart librosa analysis, optional Basic Pitch
   musical-mapper/     Stage C: pitch-to-position, color, density filtering
   trajectory-solver/  Stage D: SUVAT ballistic arc solver (core IP)
   renderer/           Stage E: headless PNG frame rendering (@napi-rs/canvas)
@@ -178,8 +195,10 @@ packages/
   cli/                CLI entry point wiring all stages together
   web/                Web UI: Express API server + React frontend (Vite)
 scripts/
-  setup-basic-pitch.ps1   Setup script for Windows (PowerShell)
-  setup-basic-pitch.sh    Setup script for macOS/Linux
+  setup-audio.ps1         Lightweight librosa setup for Windows
+  setup-audio.sh          Lightweight librosa setup for macOS/Linux
+  setup-basic-pitch.ps1   Optional Basic Pitch notes-mode setup for Windows
+  setup-basic-pitch.sh    Optional Basic Pitch notes-mode setup for macOS/Linux
 ```
 
 ## Pipeline Overview
@@ -188,18 +207,22 @@ scripts/
 Input (.mid or .wav/.mp3/.flac/.ogg)
   |
   v
-Stage B: Note Extraction
-  - MIDI: parse directly (@tonejs/midi)
-  - Audio: transcribe via Basic Pitch -> parse generated MIDI
-  -> NoteEvent[] (pitch, timing, velocity, track)
+Stage B: Note / Hit Extraction
+  - MIDI: parse exact notes directly (@tonejs/midi)
+  - Audio auto: HPSS + bass/mid/high onset fusion; merge and rank salient hits
+  - Audio beats/onsets: comparison modes using librosa
+  - Audio notes: optional Basic Pitch transcription
+  -> NoteEvent[] (timing, strength, role, confidence, stable position hint)
+  -> AudioAnalysis when requested (10 Hz features + build/drop/section cues)
   |
   v
 Stage C: Musical Mapping
-  - Pitch -> x-position (linear piano-key layout)
+  - MIDI pitch -> x-position; analyzer roles -> stable lanes/position hints
+  - Slew-limit analyzer-generated targets to prevent impossible lateral jumps
   - Pitch -> color (circle-of-fifths palette)
   - Velocity -> impact size
   - Optional density filtering (notes-per-second cap)
-  -> ChoreographyTarget[] (position, time, color, impact)
+  -> ChoreographyTarget[] (position, time, color, impact, role)
   |
   v
 Stage D: Trajectory Solver (Core IP)
@@ -245,7 +268,7 @@ npm run web:start    # Start production server on port 3001
 ### Running Tests
 
 ```bash
-# Full suite (93 tests across 15 files)
+# Full suite (currently 98 tests across 16 files)
 npm test
 
 # Single package
@@ -291,12 +314,30 @@ Each stage communicates through typed interfaces defined in `@motionscore/types`
 ```typescript
 interface NoteEvent {
   id: string;              // Unique, zero-padded: 'n0001', 'n0002', ...
-  pitchMidi: number;       // [0, 127]
+  pitchMidi: number;       // MIDI pitch, or stable x-position hint for audio hits
   startSec: number;        // >= 0
   endSec: number;          // > startSec
-  velocity: number;        // [0.0, 1.0] (midiVelocity / 127)
-  track?: string;          // Source track name
+  velocity: number;        // [0.0, 1.0] impact strength
+  source?: 'midi' | 'audio'; // Explicit provenance for choreography behavior
+  role?: 'kick' | 'bass' | 'snare' | 'percussion' | 'melodic';
+  confidence?: number;     // [0.0, 1.0]
+  salience?: number;       // [0.0, 1.0] musical importance
+  track?: string;
   instrument?: string;
+}
+```
+
+For audio callers that need more than ball hits, `analyzeAudioEvents()` returns:
+
+```typescript
+interface AudioAnalysis {
+  version: 1;
+  durationSec: number;
+  tempoBpm: number;
+  mode: 'smart' | 'beats' | 'onsets';
+  hits: NoteEvent[];
+  featureFrames: AudioFeatureFrame[]; // 10 Hz loudness/bass/brightness/etc.
+  sectionCues: SectionCue[];          // build/drop/breakdown/rise/fall
 }
 ```
 
@@ -309,6 +350,7 @@ interface ChoreographyTarget {
   position: { x: number; y: number };  // World coordinates
   impactSize: number;      // [0.0, 1.0], from velocity
   colorHint: string;       // Hex color from pitch
+  role?: 'kick' | 'bass' | 'snare' | 'percussion' | 'melodic';
 }
 ```
 
@@ -342,6 +384,8 @@ All configuration is typed. See `packages/types/src/config.ts` for the full defi
 
 | Decision | Rationale |
 |----------|-----------|
+| librosa HPSS + multi-band onsets for audio `auto` | Uses mature open-source separation/onset primitives already in the venv. It captures fills and instrument attacks that beat tracking omits without the density of note transcription. Neural stem separation remains an optional future quality mode because of model size and processing cost. |
+| Basic Pitch only for `--mode notes` | Full transcription is useful for sparse pitched recordings but too dense to drive one ball on most mixed songs. |
 | `@napi-rs/canvas` over `@pixi/node` | PixiJS node adapter requires native `gl`/`canvas` peer deps that fail to build without an OpenGL toolchain. @napi-rs/canvas ships prebuilt N-API binaries. |
 | `fluent-ffmpeg` for video export | Wraps ffmpeg subprocess cleanly; shell-free argument passing (no injection risk). |
 | `@tonejs/midi` for MIDI parsing | Handles tempo maps, multi-track, and velocity. CJS under ESM requires default-import interop. |
@@ -405,18 +449,18 @@ Install ffmpeg and ensure it's on your PATH:
 
 Or set `FFMPEG_PATH` to the ffmpeg binary location.
 
-### Audio input fails with "Basic Pitch exited with code 1"
+### Audio analysis fails or Python/librosa cannot be found
 
-Run the setup script to install Basic Pitch in a virtual environment:
+Run the setup script to install the project audio-analysis environment. The default `auto`, `beats`, and `onsets` modes require librosa; only `--mode notes` requires Basic Pitch:
 
 ```powershell
 # Windows
-.\scripts\setup-basic-pitch.ps1
+.\scripts\setup-audio.ps1
 ```
 
 ```bash
 # macOS / Linux
-./scripts/setup-basic-pitch.sh
+./scripts/setup-audio.sh
 ```
 
 Then set the `PYTHON` env var to point at the venv:
