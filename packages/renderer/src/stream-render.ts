@@ -141,18 +141,16 @@ export async function renderAndEncodeVoices(
   const drawParticles = renderConfig.particlesOnImpact !== false;
   const trailLength = Math.max(2, Math.round(fps * TRAIL_SECONDS));
 
-  // Precompute per-voice frame positions; each voice keeps its own trail buffer.
-  const prepared = activeVoices.map((v) => {
-    const positions: Array<[number, number]> = [];
-    for (let i = 0; i < totalFrames; i++) {
-      positions.push(interpolatePosition(v.trajectory.keyframes, i / fps));
-    }
-    return {
-      positions,
-      color: v.ballColor ?? BALL_COLOR,
-      trail: [] as Array<[number, number]>,
-    };
-  });
+  // Per-voice render state. Positions are interpolated lazily each frame (in the
+  // render loop below) rather than materialized up front: precomputing
+  // positions[totalFrames] for every voice held an O(voices x frames) array
+  // resident for the entire render, a major RAM cost with many balls and long
+  // songs. Interpolating on demand keeps only the keyframes in memory.
+  const prepared = activeVoices.map((v) => ({
+    keyframes: v.trajectory.keyframes,
+    color: v.ballColor ?? BALL_COLOR,
+    trail: [] as Array<[number, number]>,
+  }));
 
   // Build ffmpeg command for rawvideo input
   const ffmpegBin = process.env.FFMPEG_PATH ?? 'ffmpeg';
@@ -187,9 +185,12 @@ export async function renderAndEncodeVoices(
   } else if (codec === 'h264_qsv') {
     outputArgs.push('-global_quality', String(quality));
   } else {
-    // libx264
+    // libx264: default to a fast preset. ffmpeg's implicit default ('medium')
+    // spends a lot of CPU for a marginal size gain on this synthetic content;
+    // 'veryfast' encodes markedly quicker at the same CRF (perceived quality
+    // unchanged). An explicit --preset still overrides this.
     outputArgs.push('-crf', String(quality));
-    if (exportConfig.preset) outputArgs.push('-preset', exportConfig.preset);
+    outputArgs.push('-preset', exportConfig.preset ?? 'veryfast');
   }
 
   outputArgs.push('-pix_fmt', 'yuv420p');
@@ -226,6 +227,39 @@ export async function renderAndEncodeVoices(
   const canvas = createCanvas(width, height) as Canvas;
   const ctx = canvas.getContext('2d');
 
+  // A1: the background fill and the target keys are identical on every frame,
+  // so draw them once into an offscreen canvas and blit that single bitmap each
+  // frame instead of re-filling the background and re-stroking every target on
+  // every frame. Re-drawing all targets per frame was the dominant multi-ball
+  // slowdown; one drawImage is far cheaper regardless of target count.
+  const staticCanvas = createCanvas(width, height) as Canvas;
+  const staticCtx = staticCanvas.getContext('2d');
+  staticCtx.globalAlpha = 1;
+  staticCtx.fillStyle = backgroundColor;
+  staticCtx.fillRect(0, 0, width, height);
+  drawTargets(staticCtx, allTargets, ballRadius);
+
+  // Reused scratch for each frame's ball positions (length = voice count, not
+  // frame count), so interpolatePosition runs once per ball per frame and is
+  // shared between the trail and the ball draw. Each entry is a fresh tuple from
+  // interpolatePosition, so pushing it into a trail buffer never aliases across
+  // frames.
+  const framePositions: Array<[number, number]> = new Array(prepared.length);
+
+  // A2: two reusable RGBA frame buffers, written alternately. canvas.data()
+  // returns a live view into the canvas' pixel memory (it mutates on the next
+  // draw), so we copy it into a stable buffer before handing it to ffmpeg.
+  // Reusing buffers avoids allocating width*height*4 bytes every frame (the old
+  // Buffer.from(getImageData().data.buffer) path churned ~8 MiB/frame at 1080p,
+  // thrashing the GC). Two buffers is ample: every frame far exceeds the pipe's
+  // high-water mark, so each write reports backpressure and we await 'drain'
+  // (the chunk fully flushes) before a buffer is reused.
+  const frameByteLength = width * height * 4;
+  const frameBuffers: [Buffer, Buffer] = [
+    Buffer.allocUnsafe(frameByteLength),
+    Buffer.allocUnsafe(frameByteLength),
+  ];
+
   try {
     for (let i = 0; i < totalFrames; i++) {
       // If ffmpeg exited early (e.g. invalid config), stop writing so its
@@ -235,30 +269,38 @@ export async function renderAndEncodeVoices(
 
       const t = i / fps;
 
-      // Draw frame
+      // Interpolate each ball's current position once for this frame (A4:
+      // on-demand instead of a precomputed positions[totalFrames] per voice).
+      for (let v = 0; v < prepared.length; v++) {
+        framePositions[v] = interpolatePosition(prepared[v]!.keyframes, t);
+      }
+
+      // Draw frame: blit the prebuilt static layer (background + target keys).
       ctx.globalAlpha = 1;
-      ctx.fillStyle = backgroundColor;
-      ctx.fillRect(0, 0, width, height);
-      drawTargets(ctx, allTargets, ballRadius);
+      ctx.drawImage(staticCanvas, 0, 0);
 
       // Trails under everything, then impacts, then the balls on top.
       if (drawTrail) {
-        for (const pv of prepared) {
-          pv.trail.push(pv.positions[i]!);
+        for (let v = 0; v < prepared.length; v++) {
+          const pv = prepared[v]!;
+          pv.trail.push(framePositions[v]!);
           if (pv.trail.length > trailLength) pv.trail.shift();
           if (pv.trail.length >= 2) drawTrailLine(ctx, pv.trail, ballRadius, pv.color);
         }
       }
       if (drawParticles) drawImpacts(ctx, impacts, t, ballRadius);
-      for (const pv of prepared) {
-        drawBall(ctx, pv.positions[i]!, ballRadius, pv.color);
+      for (let v = 0; v < prepared.length; v++) {
+        drawBall(ctx, framePositions[v]!, ballRadius, prepared[v]!.color);
       }
 
-      // Get raw RGBA pixels and write to ffmpeg stdin
-      const imageData = ctx.getImageData(0, 0, width, height);
-      const buffer = Buffer.from(imageData.data.buffer);
+      // Copy raw RGBA pixels into a reusable buffer, then write to ffmpeg stdin.
+      // canvas.data() aliases live pixel memory, so it must be copied before the
+      // next frame overwrites it and before the async write reads it. Byte order
+      // is identical to getImageData().data (verified), so colors are unchanged.
+      const frameBuffer = frameBuffers[i & 1]!;
+      canvas.data().copy(frameBuffer);
 
-      const canWrite = ffmpeg.stdin!.write(buffer);
+      const canWrite = ffmpeg.stdin!.write(frameBuffer);
       if (!canWrite) {
         // Backpressure: wait for drain, but also unblock if ffmpeg closed the
         // pipe early so a failed encode surfaces via ffmpegDone instead of

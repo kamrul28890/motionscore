@@ -82,6 +82,18 @@ export interface PipelineResult {
    * `notes` transcription.
    */
   analysis?: AudioAnalysisSummary;
+  /**
+   * The full multi-ball choreography (voices + solved trajectories) from Stage
+   * D. Exposed so a real-time renderer can draw the motion directly instead of
+   * relying on the baked MP4. Always present.
+   */
+  choreography: Choreography;
+  /**
+   * The full rich audio analysis (per-hit events with role/salience, 10 Hz
+   * feature frames, section cues) when the input was audio analyzed with a
+   * rhythmic mode; absent for MIDI/`notes`. `analysis` above is derived from it.
+   */
+  audioAnalysis?: AudioAnalysis;
 }
 
 /** Cap on the downsampled energy timeline points carried in the summary. */
@@ -501,6 +513,28 @@ export async function runPipeline(parsed: ParsedArgs): Promise<PipelineResult> {
       0,
     );
 
+    // Fast path: the real-time 2D renderer only needs analysis + choreography +
+    // the original audio, so skip the slow render/encode entirely and return the
+    // data immediately (Stage E+F is the dominant cost — see docs).
+    if (options.skipRender === true) {
+      logVerbose(verbose, 'skipRender: returning choreography without rendering');
+      const fast: PipelineResult = {
+        outputPath: '',
+        stats: {
+          totalNotes: notes.length,
+          renderedFrames: 0,
+          durationSec: requestedDurationSec,
+          maxSyncErrorMs,
+        },
+        choreography,
+      };
+      if (extraction.audioAnalysis !== undefined) {
+        fast.analysis = summarizeAnalysis(extraction.audioAnalysis);
+        fast.audioAnalysis = extraction.audioAnalysis;
+      }
+      return fast;
+    }
+
     // --- ffmpeg pre-flight (fail fast before rendering; design Error #4) ---
     startedAt = stageStart(verbose, 'check ffmpeg available');
     await assertFfmpegAvailable();
@@ -570,9 +604,11 @@ export async function runPipeline(parsed: ParsedArgs): Promise<PipelineResult> {
         durationSec: requestedDurationSec,
         maxSyncErrorMs,
       },
+      choreography,
     };
     if (extraction.audioAnalysis !== undefined) {
       result.analysis = summarizeAnalysis(extraction.audioAnalysis);
+      result.audioAnalysis = extraction.audioAnalysis;
     }
     return result;
 }

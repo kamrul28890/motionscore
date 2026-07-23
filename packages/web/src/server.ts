@@ -17,9 +17,13 @@ import multer from 'multer';
 import cors from 'cors';
 import { nanoid } from 'nanoid';
 
-import { runPipeline, detectInputType, type ParsedArgs } from '@motionscore/cli';
-import { detectAvailableEncoders } from '@motionscore/video-export';
-import type { AudioAnalysisSummary, CLIOptions } from '@motionscore/types';
+import type { ParsedArgs } from '@motionscore/cli';
+import type {
+  AudioAnalysisSummary,
+  AudioAnalysis,
+  Choreography,
+  CLIOptions,
+} from '@motionscore/types';
 
 // ---------------------------------------------------------------------------
 // Auto-detect venv Python for Basic Pitch transcription
@@ -96,6 +100,14 @@ interface Job {
   status: 'pending' | 'running' | 'complete' | 'error';
   inputPath: string;
   outputPath: string;
+  /** 'audio' | 'midi' — only audio has a playable track to stream to the browser. */
+  inputType?: 'midi' | 'audio';
+  /** Original file extension (with dot), used to set the audio Content-Type. */
+  inputExt?: string;
+  /** Full choreography for the real-time renderer (set on completion). */
+  choreography?: Choreography;
+  /** Full rich audio analysis for the real-time renderer (audio only). */
+  analysisFull?: AudioAnalysis;
   progress: ProgressEvent[];
   stats?: {
     totalNotes: number;
@@ -116,6 +128,10 @@ interface ProgressEvent {
   stats?: Job['stats'];
   analysis?: AudioAnalysisSummary;
   videoUrl?: string;
+  /** URL for the full choreography + analysis JSON (real-time renderer). */
+  resultUrl?: string;
+  /** URL to stream the original audio for in-browser playback (audio only). */
+  audioUrl?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -177,10 +193,16 @@ function estimatePercent(stageName: string, done: boolean): number {
 // Progress capture
 // ---------------------------------------------------------------------------
 
-function runWithProgressCapture(
+/** runPipeline's result type, referenced without eagerly loading the CLI module. */
+type PipelineResult = Awaited<ReturnType<(typeof import('@motionscore/cli'))['runPipeline']>>;
+
+async function runWithProgressCapture(
   parsed: ParsedArgs,
   onProgress: (line: string) => void,
-): ReturnType<typeof runPipeline> {
+): Promise<PipelineResult> {
+  // Lazy-load the heavy pipeline (pulls in the renderer + native canvas) only
+  // when a job actually runs, so the server binds its port instantly at boot.
+  const { runPipeline } = await import('@motionscore/cli');
   const originalWrite = process.stderr.write.bind(process.stderr);
   process.stderr.write = ((chunk: any, ...args: any[]) => {
     const str = typeof chunk === 'string' ? chunk : chunk.toString();
@@ -190,9 +212,11 @@ function runWithProgressCapture(
     return originalWrite(chunk, ...args);
   }) as typeof process.stderr.write;
 
-  return runPipeline(parsed).finally(() => {
+  try {
+    return await runPipeline(parsed);
+  } finally {
     process.stderr.write = originalWrite;
-  });
+  }
 }
 
 function parseProgressLine(line: string): ProgressEvent {
@@ -294,6 +318,7 @@ const upload = multer({
 
 // GET /api/encoders — list available H.264 encoders (for the frontend dropdown)
 app.get('/api/encoders', async (_req: Request, res: Response) => {
+  const { detectAvailableEncoders } = await import('@motionscore/video-export');
   const encoders = await detectAvailableEncoders();
   const descriptions: Record<string, string> = {
     'libx264': 'CPU (libx264)',
@@ -340,6 +365,7 @@ app.post('/api/generate', upload.single('file'), async (req: Request, res: Respo
     status: 'pending',
     inputPath,
     outputPath,
+    inputExt: originalExt,
     progress: [],
     createdAt: Date.now(),
     listeners: new Set(),
@@ -355,6 +381,7 @@ app.post('/api/generate', upload.single('file'), async (req: Request, res: Respo
 
     let inputType: 'midi' | 'audio';
     try {
+      const { detectInputType } = await import('@motionscore/cli');
       inputType = detectInputType(inputPath);
     } catch (err: any) {
       job.status = 'error';
@@ -363,6 +390,8 @@ app.post('/api/generate', upload.single('file'), async (req: Request, res: Respo
       scheduleCleanup(job);
       return;
     }
+
+    job.inputType = inputType;
 
     const options: CLIOptions = {
       input: inputPath,
@@ -378,6 +407,11 @@ app.post('/api/generate', upload.single('file'), async (req: Request, res: Respo
       gpuDevice,
       preset,
       parallelFrames,
+      // Audio inputs power the real-time 2D renderer, which needs only the
+      // analysis + choreography + original audio — so skip the slow MP4 render
+      // (the browser plays /api/audio directly). MIDI has no playable audio, so
+      // it still renders a video-only MP4.
+      skipRender: inputType === 'audio',
     };
 
     const parsed: ParsedArgs = { options, inputType };
@@ -390,11 +424,16 @@ app.post('/api/generate', upload.single('file'), async (req: Request, res: Respo
 
       job.status = 'complete';
       job.stats = result.stats;
+      job.choreography = result.choreography;
+      job.analysisFull = result.audioAnalysis;
+      const hasVideo = job.inputType !== 'audio';
       emitToJob(job, {
         status: 'complete',
         stats: result.stats,
         analysis: result.analysis,
-        videoUrl: `/api/video/${jobId}`,
+        videoUrl: hasVideo ? `/api/video/${jobId}` : undefined,
+        resultUrl: `/api/result/${jobId}`,
+        audioUrl: job.inputType === 'audio' ? `/api/audio/${jobId}` : undefined,
         message: 'Pipeline complete',
         percent: 100,
       });
@@ -483,6 +522,61 @@ app.get('/api/video/:jobId/download', (req: Request, res: Response) => {
 
   res.setHeader('Content-Disposition', `attachment; filename="motionscore-${job.id}.mp4"`);
   res.sendFile(job.outputPath);
+});
+
+// GET /api/result/:jobId — full choreography + rich analysis JSON for the
+// real-time (Three.js) renderer. Kept separate from the SSE progress frame so
+// large trajectory/analysis payloads don't bloat the event stream.
+app.get('/api/result/:jobId', (req: Request, res: Response) => {
+  const jobId = Array.isArray(req.params.jobId) ? req.params.jobId[0] : req.params.jobId;
+  const job = jobId ? jobs.get(jobId) : undefined;
+  if (!job) {
+    res.status(404).json({ error: 'Job not found' });
+    return;
+  }
+  if (job.status !== 'complete') {
+    res.status(409).json({ error: 'Result not ready yet', status: job.status });
+    return;
+  }
+  res.json({
+    durationSec: job.stats?.durationSec ?? job.choreography?.durationSec ?? 0,
+    inputType: job.inputType ?? 'audio',
+    hasAudio: job.inputType === 'audio',
+    audioUrl: job.inputType === 'audio' ? `/api/audio/${jobId}` : null,
+    videoUrl: job.inputType === 'audio' ? null : `/api/video/${jobId}`,
+    choreography: job.choreography ?? null,
+    analysis: job.analysisFull ?? null,
+  });
+});
+
+// GET /api/audio/:jobId — stream the ORIGINAL uploaded audio so the browser can
+// play it in sync with the real-time renderer. Only audio inputs have a
+// playable track (MIDI is video-only). res.sendFile supports Range requests, so
+// the <audio> element can seek.
+const AUDIO_CONTENT_TYPES: Record<string, string> = {
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.flac': 'audio/flac',
+  '.ogg': 'audio/ogg',
+};
+app.get('/api/audio/:jobId', (req: Request, res: Response) => {
+  const jobId = Array.isArray(req.params.jobId) ? req.params.jobId[0] : req.params.jobId;
+  const job = jobId ? jobs.get(jobId) : undefined;
+  if (!job) {
+    res.status(404).json({ error: 'Job not found' });
+    return;
+  }
+  if (job.inputType !== 'audio') {
+    res.status(404).json({ error: 'No playable audio for this input' });
+    return;
+  }
+  if (!existsSync(job.inputPath)) {
+    res.status(410).json({ error: 'Audio has been cleaned up' });
+    return;
+  }
+  const ext = job.inputExt ?? '.mp3';
+  res.setHeader('Content-Type', AUDIO_CONTENT_TYPES[ext] ?? 'application/octet-stream');
+  res.sendFile(job.inputPath);
 });
 
 // ---------------------------------------------------------------------------

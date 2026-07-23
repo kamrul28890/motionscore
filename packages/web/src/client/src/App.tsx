@@ -4,6 +4,9 @@ import { ConfigForm } from './components/ConfigForm.js';
 import { ProgressDisplay } from './components/ProgressDisplay.js';
 import { VideoPlayer } from './components/VideoPlayer.js';
 import { AnalysisPanel } from './components/AnalysisPanel.js';
+import { LiveScene } from './components/LiveScene.js';
+import { DEFAULT_SCENE_SETTINGS, type Scene2DSettings } from './scene2d/index.js';
+import type { ResultPayload } from './renderTypes.js';
 
 export type AppState = 'idle' | 'uploading' | 'generating' | 'complete' | 'error';
 
@@ -75,6 +78,8 @@ export interface ProgressEvent {
   stats?: PipelineStats;
   analysis?: AudioAnalysisSummary;
   videoUrl?: string;
+  resultUrl?: string;
+  audioUrl?: string;
 }
 
 export function App() {
@@ -97,6 +102,9 @@ export function App() {
   const [jobId, setJobId] = useState<string | null>(null);
   const [stats, setStats] = useState<PipelineStats | null>(null);
   const [analysis, setAnalysis] = useState<AudioAnalysisSummary | null>(null);
+  const [result, setResult] = useState<ResultPayload | null>(null);
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [rideSettings, setRideSettings] = useState<Scene2DSettings>(DEFAULT_SCENE_SETTINGS);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const handleGenerate = useCallback(async () => {
@@ -107,6 +115,8 @@ export function App() {
     setVideoUrl(null);
     setStats(null);
     setAnalysis(null);
+    setResult(null);
+    setAudioUrl(null);
     setErrorMessage(null);
 
     const formData = new FormData();
@@ -146,9 +156,17 @@ export function App() {
 
         if (data.status === 'complete') {
           setState('complete');
-          setVideoUrl(data.videoUrl ?? `/api/video/${id}`);
+          setVideoUrl(data.videoUrl ?? null);
           setStats(data.stats ?? null);
           setAnalysis(data.analysis ?? null);
+          setAudioUrl(data.audioUrl ?? null);
+          // Fetch the full choreography + analysis payload for the live scene
+          // (kept off the SSE frame because the trajectory JSON can be large).
+          const resultUrl = data.resultUrl ?? `/api/result/${id}`;
+          fetch(resultUrl)
+            .then((r) => (r.ok ? r.json() : null))
+            .then((payload: ResultPayload | null) => setResult(payload))
+            .catch(() => setResult(null));
           eventSource.close();
         } else if (data.status === 'error') {
           setState('error');
@@ -182,6 +200,8 @@ export function App() {
     setJobId(null);
     setStats(null);
     setAnalysis(null);
+    setResult(null);
+    setAudioUrl(null);
     setErrorMessage(null);
   }, []);
 
@@ -213,14 +233,29 @@ export function App() {
             <ProgressDisplay events={progress} />
           )}
 
-          {state === 'complete' && videoUrl && (
+          {state === 'complete' && (
             <>
-              <VideoPlayer
-                videoUrl={videoUrl}
-                jobId={jobId!}
-                stats={stats}
-                onReset={handleReset}
-              />
+              {audioUrl ? (
+                <LiveScene
+                  result={result}
+                  audioUrl={audioUrl}
+                  videoUrl={videoUrl}
+                  jobId={jobId!}
+                  stats={stats}
+                  settings={rideSettings}
+                  onSettingsChange={setRideSettings}
+                  onReset={handleReset}
+                />
+              ) : (
+                videoUrl && (
+                  <VideoPlayer
+                    videoUrl={videoUrl}
+                    jobId={jobId!}
+                    stats={stats}
+                    onReset={handleReset}
+                  />
+                )
+              )}
               {analysis && <AnalysisPanel analysis={analysis} />}
             </>
           )}

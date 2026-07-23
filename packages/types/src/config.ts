@@ -51,6 +51,13 @@ export interface CLIOptions {
   preset?: string;
   /** Number of frames to render in parallel (default: 4). */
   parallelFrames?: number;
+  /**
+   * When true, stop after solving the choreography and skip the (slow) Stage
+   * E+F render/encode. Used by the real-time 2D renderer, which only needs the
+   * analysis + choreography + original audio — not a baked MP4. `outputPath` is
+   * left empty and `stats.renderedFrames` is 0.
+   */
+  skipRender?: boolean;
 }
 
 /**

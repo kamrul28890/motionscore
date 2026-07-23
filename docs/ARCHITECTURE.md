@@ -225,24 +225,28 @@ Keep this as a distinct, swappable layer on top of Stage E's raw simulation
 output rather than baked into the physics or renderer code, so visual style
 can change without touching simulation logic.
 
-**Implementation status (2D "juice").** Until the dedicated art-direction layer
-/ 3D renderer exists, a set of impact-reactive effects lives in the 2D renderer's
-draw helpers (`stream-render.ts`), tuned via constants at the top of the file:
-- **Squash & stretch** — the ball elongates along its velocity between hits and
-  flattens vertically for a moment on impact (velocity is the per-frame position
-  delta; the squash window is keyed to each voice's own impact times).
-- **Impact bloom + shards** — a bright radial flash and an expanding shockwave
-  ring behind the ball, plus additive debris shards that arc outward under a
-  decorative gravity.
-- **Key-press flash** — a struck key brightens briefly over its resting self.
-- **Screen shake** — strong impacts nudge the whole frame; the static layer is
-  overscanned so the shift never exposes an edge.
-- **Additive trails** — trails composite with `lighter` for a glow.
-
-These are gated where sensible by `RenderConfig.particlesOnImpact` and scale
-with `impactSize`, so they read as reactions to the music rather than constant
-motion. This is deliberately a stopgap inside Stage E's renderer; the design
-intent (a swappable Stage F, plus a camera) still stands.
+**Implementation status: real-time 2D "DoodleChaos" renderer (web, shipped).**
+An earlier 3D React-Three-Fiber renderer was tried and rejected as busy and
+misaligned; it was removed. The live view is now a strict, deterministic 2D
+canvas renderer in `packages/web/src/client/src/scene2d/` (framework-agnostic —
+it draws through a minimal `Ctx2D` interface so the same module can later drive
+the Node MP4 exporter and stay pixel-identical). Concept: time maps to
+horizontal distance (`x = t·SCROLL_X`) and the whole scene drifts down; a few
+balls (busiest instrument roles, capped low) bounce on beat-aligned parabolic
+arcs (kinematic inversion — contact lands exactly on the beat) around their own
+lanes, and glide along a line during `rise`/`fall` section cues. Art direction
+is intentionally minimal: near-white paper, near-black track (a short "kicker"
+tick at each contact + slide polylines), solid role-colored balls. The camera is
+purely positional — it follows the balls and fit-zooms to frame them with a
+fixed look-ahead window; it never reacts to audio energy (no shake). Everything
+is a closed-form function of `<audio>.currentTime` (frame-accurate, seek-safe),
+built from the `AudioAnalysis` sent to the client via `GET /api/result` +
+`GET /api/audio`. Key files: `scene2d/{model,render,types,settings}.ts`,
+`components/LiveScene.tsx` (canvas + rAF loop), `components/RideControls.tsx`
+(role toggles + ball cap). The old 2D node-canvas path is still the downloadable
+baked MP4. Follow-up: share the `scene2d` module with the exporter so the
+downloaded video matches the live view (currently it uses the older piano-key
+renderer).
 
 ### Alternate track: Line Rider-specific integration
 
