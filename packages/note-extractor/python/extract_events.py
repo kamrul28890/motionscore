@@ -484,137 +484,133 @@ def _detect_section_cues(frames: list[dict], duration: float):
     percussive = np.asarray([frame["percussiveEnergy"] for frame in frames], dtype=float)
 
     energy = _smooth(0.42 * loudness + 0.33 * bass + 0.15 * density + 0.10 * percussive, 5)
-    lookback = max(1, int(round(2.0 * FEATURE_RATE_HZ)))
-    previous = np.concatenate((np.full(lookback, energy[0]), energy[:-lookback]))
-    previous_density = np.concatenate((np.full(lookback, density[0]), density[:-lookback]))
-    previous_brightness = np.concatenate((np.full(lookback, brightness[0]), brightness[:-lookback]))
 
-    energy_change = energy - previous
-    density_change = _smooth(density, 5) - _smooth(previous_density, 5)
-    brightness_change = _smooth(brightness, 5) - _smooth(previous_brightness, 5)
-    rise_score = np.clip(
-        0.55 * np.maximum(energy_change, 0.0) / 0.35
-        + 0.27 * np.maximum(density_change, 0.0) / 0.35
-        + 0.18 * np.maximum(brightness_change, 0.0) / 0.35,
-        0.0,
-        1.0,
-    )
-    fall_score = np.clip(
-        0.68 * np.maximum(-energy_change, 0.0) / 0.35
-        + 0.20 * np.maximum(-density_change, 0.0) / 0.35
-        + 0.12 * np.maximum(-brightness_change, 0.0) / 0.35,
-        0.0,
-        1.0,
-    )
+    # Reference the track's own dynamic range instead of absolute thresholds, so
+    # cues do not fire on every phrase in consistently-loud material. (The old
+    # absolute thresholds produced a "drop" every few seconds on dense music and
+    # even on solo piano.)
+    lo = float(np.percentile(energy, 25))
+    hi = float(np.percentile(energy, 80))
+    rng = max(hi - lo, 0.08)
+    fps = FEATURE_RATE_HZ
 
     cues: list[dict] = []
-    min_trend_frames = max(6, int(round(0.8 * FEATURE_RATE_HZ)))
-    for start, end in _contiguous_segments(rise_score >= 0.34):
+
+    # Sustained trends: energy change over a multi-second window, expressed as a
+    # fraction of the whole-track dynamic range. Only large, sustained moves
+    # qualify, which keeps rises/falls rare and meaningful.
+    trend_win = max(1, int(round(3.0 * fps)))
+    prev_energy = np.concatenate((np.full(trend_win, energy[0]), energy[:-trend_win]))
+    norm_delta = (energy - prev_energy) / rng
+    min_trend_frames = max(1, int(round(1.5 * fps)))
+
+    for start, end in _contiguous_segments(norm_delta >= 0.55):
         if end - start + 1 < min_trend_frames:
             continue
-        actual_start = max(0, start - lookback)
-        peak_index = start + int(np.argmax(rise_score[start : end + 1]))
-        intensity = _clip01(float(rise_score[peak_index]))
-        density_gain = float(density[end] - density[actual_start])
-        cue_type = "build" if density_gain > 0.10 and intensity >= 0.48 else "rise"
+        seg_start = max(0, start - trend_win)
+        peak_index = start + int(np.argmax(norm_delta[start : end + 1]))
+        intensity = _clip01(float(norm_delta[peak_index]) / 1.5)
+        # 'build' only when energy climbs into the track's high-energy band; the
+        # drop pass below may retime a build to end exactly on a detected drop.
+        cue_type = "build" if float(energy[end]) >= hi - 0.15 * rng else "rise"
         cues.append(
             {
                 "type": cue_type,
-                "startSec": round(float(times[actual_start]), 3),
+                "startSec": round(float(times[seg_start]), 3),
                 "endSec": round(float(times[end]), 3),
                 "peakSec": round(float(times[peak_index]), 3),
                 "intensity": round(intensity, 4),
-                "confidence": round(_clip01(0.35 + 0.60 * intensity), 4),
+                "confidence": round(_clip01(0.4 + 0.55 * intensity), 4),
             }
         )
 
-    for start, end in _contiguous_segments(fall_score >= 0.36):
+    for start, end in _contiguous_segments(norm_delta <= -0.55):
         if end - start + 1 < min_trend_frames:
             continue
-        peak_index = start + int(np.argmax(fall_score[start : end + 1]))
-        intensity = _clip01(float(fall_score[peak_index]))
-        cue_type = "breakdown" if float(energy[end]) < 0.38 else "fall"
+        seg_start = max(0, start - trend_win)
+        peak_index = start + int(np.argmin(norm_delta[start : end + 1]))
+        intensity = _clip01(-float(norm_delta[peak_index]) / 1.5)
+        cue_type = "breakdown" if float(energy[end]) <= lo + 0.15 * rng else "fall"
         cues.append(
             {
                 "type": cue_type,
-                "startSec": round(float(times[start]), 3),
+                "startSec": round(float(times[seg_start]), 3),
                 "endSec": round(float(times[end]), 3),
                 "peakSec": round(float(times[peak_index]), 3),
                 "intensity": round(intensity, 4),
-                "confidence": round(_clip01(0.35 + 0.60 * intensity), 4),
+                "confidence": round(_clip01(0.4 + 0.55 * intensity), 4),
             }
         )
 
-    # A drop is a short broadband + bass jump after a quieter window. Use local
-    # maxima and a cooldown so one transition produces one cue, not many frames.
-    drop_candidates: list[tuple[float, int]] = []
-    pre_frames = max(4, int(round(1.0 * FEATURE_RATE_HZ)))
-    post_frames = max(2, int(round(0.5 * FEATURE_RATE_HZ)))
+    # A drop is a transition from a genuine dip (low relative to the whole
+    # track) into a sustained high-energy section, confirmed by bass. Rather
+    # than a fixed cooldown or a hard count cap, drops are the prominent peaks
+    # of a whole-song "drop-likelihood" curve, so the count emerges from the
+    # track itself. The only spacing is a ~1s perceptual de-duplication of a
+    # single transient, not a musical constraint.
+    from scipy.signal import find_peaks
+
+    pre_frames = max(3, int(round(2.0 * fps)))
+    post_frames = max(2, int(round(1.5 * fps)))
+    drop_score = np.zeros(len(frames), dtype=float)
     for index in range(pre_frames, len(frames) - post_frames):
-        pre_energy = float(np.mean(energy[index - pre_frames : index - 1]))
+        pre_energy = float(np.mean(energy[index - pre_frames : index]))
         post_energy = float(np.mean(energy[index : index + post_frames]))
-        pre_bass = float(np.mean(bass[index - pre_frames : index - 1]))
+        pre_bass = float(np.mean(bass[index - pre_frames : index]))
         post_bass = float(np.mean(bass[index : index + post_frames]))
-        energy_jump = max(0.0, post_energy - pre_energy)
-        bass_jump = max(0.0, post_bass - pre_bass)
-        onset_peak = float(np.max(density[max(0, index - 1) : index + 2]))
-        instant_jump = max(0.0, float(energy[index] - energy[max(0, index - 2)]))
-        score = _clip01(
-            0.42 * energy_jump / 0.35
-            + 0.34 * bass_jump / 0.35
-            + 0.14 * instant_jump / 0.25
-            + 0.10 * onset_peak
-        )
-        if score >= 0.46 and energy_jump >= 0.10 and post_energy >= 0.42:
-            drop_candidates.append((score, index))
+        jump = (post_energy - pre_energy) / rng
+        bass_jump = (post_bass - pre_bass) / rng
+        came_from_dip = pre_energy <= lo + 0.30 * rng
+        lands_high = post_energy >= hi - 0.15 * rng
+        if came_from_dip and lands_high and jump >= 0.50 and bass_jump >= -0.05:
+            drop_score[index] = _clip01(
+                0.6 * (jump / 1.2) + 0.4 * (max(0.0, bass_jump) / 1.0)
+            )
 
-    selected_drops: list[tuple[float, int]] = []
-    cooldown_frames = int(round(3.0 * FEATURE_RATE_HZ))
-    for score, index in sorted(drop_candidates, reverse=True):
-        if any(abs(index - kept_index) < cooldown_frames for _, kept_index in selected_drops):
-            continue
-        selected_drops.append((score, index))
-
-    # The post-transition average makes a drop candidate robust but can place it
-    # slightly late. Realign each candidate to the strongest local energy/bass
-    # edge so a rendered impact lands on the transient itself.
+    # Realign each drop to the strongest local energy/bass edge so a rendered
+    # impact lands on the transient itself.
     energy_step = np.maximum(np.diff(energy, prepend=energy[0]), 0.0)
     bass_step = np.maximum(np.diff(bass, prepend=bass[0]), 0.0)
     transition_edge = 0.55 * energy_step + 0.35 * bass_step + 0.10 * density
-    aligned_drops: list[tuple[float, int]] = []
-    align_back = int(round(0.8 * FEATURE_RATE_HZ))
-    align_forward = int(round(0.2 * FEATURE_RATE_HZ))
-    for score, index in selected_drops:
-        search_start = max(1, index - align_back)
-        search_end = min(len(frames), index + align_forward + 1)
-        aligned_index = search_start + int(
-            np.argmax(transition_edge[search_start:search_end])
-        )
-        if any(
-            abs(aligned_index - kept_index) < cooldown_frames
-            for _, kept_index in aligned_drops
-        ):
-            continue
-        aligned_drops.append((score, aligned_index))
+    align_back = int(round(0.8 * fps))
+    align_forward = int(round(0.2 * fps))
 
-    for score, index in sorted(aligned_drops, key=lambda item: item[1]):
+    selected_drops: list[tuple[float, int]] = []
+    positive = drop_score[drop_score > 0.0]
+    if positive.size:
+        # Height and prominence adapt to this track's own candidate strengths;
+        # `distance` only avoids counting one transient twice (~1s).
+        height = max(0.42, float(np.percentile(positive, 50)))
+        prominence = max(0.10, float(np.std(positive)) * 0.5)
+        dedup_distance = max(1, int(round(1.0 * fps)))
+        peak_indices, _props = find_peaks(
+            drop_score, height=height, distance=dedup_distance, prominence=prominence
+        )
+        for raw_index in peak_indices:
+            index = int(raw_index)
+            search_start = max(1, index - align_back)
+            search_end = min(len(frames), index + align_forward + 1)
+            aligned_index = search_start + int(
+                np.argmax(transition_edge[search_start:search_end])
+            )
+            selected_drops.append((float(drop_score[index]), aligned_index))
+
+    for score, index in sorted(selected_drops, key=lambda item: item[1]):
         peak_sec = float(times[index])
-        # Promote a rise that leads into or spans the drop, and end it exactly
-        # on the transient. Offline rendering can use this interval as lookahead.
+        # Promote a rise leading into the drop to a build ending on the drop, so
+        # offline rendering has the lookahead interval for a long fall.
         for cue in cues:
-            cue_start = float(cue["startSec"])
             cue_end = float(cue["endSec"])
             if (
                 cue["type"] in ("rise", "build")
-                and cue_start < peak_sec
+                and float(cue["startSec"]) < peak_sec
                 and (cue_end >= peak_sec or peak_sec - cue_end <= 2.0)
             ):
                 cue["type"] = "build"
                 cue["endSec"] = round(peak_sec, 3)
                 cue["peakSec"] = round(peak_sec, 3)
                 cue["confidence"] = round(
-                    _clip01(max(float(cue["confidence"]), 0.45 + 0.45 * score)),
-                    4,
+                    _clip01(max(float(cue["confidence"]), 0.5 + 0.4 * score)), 4
                 )
         cues.append(
             {
@@ -622,11 +618,13 @@ def _detect_section_cues(frames: list[dict], duration: float):
                 "startSec": round(peak_sec, 3),
                 "endSec": round(min(duration, peak_sec + 0.5), 3),
                 "peakSec": round(peak_sec, 3),
-                "intensity": round(_clip01(score), 4),
-                "confidence": round(_clip01(0.45 + 0.50 * score), 4),
+                "intensity": round(_clip01(0.4 + 0.6 * score), 4),
+                "confidence": round(_clip01(0.5 + 0.45 * score), 4),
             }
         )
 
+    # No arbitrary count cap: how many cues appear is governed by the
+    # whole-track-relative thresholds above, so structure emerges from the music.
     return sorted(cues, key=lambda cue: (cue["startSec"], cue["type"]))
 
 

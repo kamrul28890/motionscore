@@ -21,13 +21,16 @@ const STAGE_CHOREOGRAPHY_TARGET = 'Stage C (ChoreographyTarget)';
 const STAGE_OBJECT_TRAJECTORY = 'Stage D (ObjectTrajectory)';
 const STAGE_CHOREOGRAPHY = 'Stage C/D (Choreography)';
 
-/** Supported hit roles, used by several field validators. */
+/** Supported hit roles, used by several field validators (single source of truth). */
 const HIT_ROLE_VALUES: readonly string[] = [
   'kick',
   'bass',
   'snare',
   'percussion',
   'melodic',
+  'vocal',
+  'piano',
+  'guitar',
 ];
 
 /**
@@ -116,10 +119,7 @@ export function validateNoteEvents(events: NoteEvent[]): void {
     ) {
       throw new ValidationError(STAGE_NOTE_EVENT, `events[${i}].source`, event.source);
     }
-    if (
-      event.role !== undefined &&
-      !['kick', 'bass', 'snare', 'percussion', 'melodic'].includes(event.role)
-    ) {
+    if (event.role !== undefined && !HIT_ROLE_VALUES.includes(event.role)) {
       throw new ValidationError(STAGE_NOTE_EVENT, `events[${i}].role`, event.role);
     }
     if (
@@ -228,10 +228,7 @@ export function validateChoreographyTargets(
       );
     }
 
-    if (
-      target.role !== undefined &&
-      !['kick', 'bass', 'snare', 'percussion', 'melodic'].includes(target.role)
-    ) {
+    if (target.role !== undefined && !HIT_ROLE_VALUES.includes(target.role)) {
       throw new ValidationError(
         STAGE_CHOREOGRAPHY_TARGET,
         `targets[${i}].role`,

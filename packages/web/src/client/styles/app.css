@@ -547,6 +547,58 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* Per-role activity over time */
+.role-activity {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.role-activity-row {
+  display: grid;
+  grid-template-columns: 104px 1fr 34px;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.role-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.role-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.role-activity-strip {
+  width: 100%;
+  height: 22px;
+  background: var(--bg-input);
+  border-radius: 4px;
+  display: block;
+}
+
+.role-activity-axis {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.68rem;
+  color: var(--text-secondary);
+  margin-top: 0.1rem;
+}
+
+.role-activity-caption {
+  font-style: italic;
+  opacity: 0.8;
+}
+
 /* Energy sparkline */
 .energy-spark {
   width: 100%;

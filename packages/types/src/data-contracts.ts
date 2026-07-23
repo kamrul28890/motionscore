@@ -5,11 +5,77 @@
 // TrajectoryKeyframe/ObjectTrajectory (Stage D). Each type documents the
 // runtime validation rules enforced by the validators in task 1.3.
 
-/** Musical function assigned to a salient audio attack. */
-export type HitRole = 'kick' | 'bass' | 'snare' | 'percussion' | 'melodic';
+/**
+ * Musical role assigned to a hit. The first five come from the lightweight
+ * frequency-band analyzer; `vocal` / `piano` / `guitar` are produced by the
+ * neural stem analyzer (Demucs `htdemucs_6s`), which isolates real instruments.
+ */
+export type HitRole =
+  | 'kick'
+  | 'bass'
+  | 'snare'
+  | 'percussion'
+  | 'melodic'
+  | 'vocal'
+  | 'piano'
+  | 'guitar';
 
-/** Analyzer strategies that produce rhythmic events from an audio waveform. */
-export type AudioAnalysisMode = 'smart' | 'beats' | 'onsets';
+/**
+ * Canonical display order for roles: the percussion cluster first, then pitched
+ * instruments. Used by the analysis UI and anywhere roles are enumerated.
+ */
+export const ROLE_ORDER: readonly HitRole[] = [
+  'kick',
+  'snare',
+  'percussion',
+  'bass',
+  'melodic',
+  'piano',
+  'guitar',
+  'vocal',
+];
+
+/**
+ * Canonical ball tint per role — the single source of truth shared by the
+ * mapper (each per-role ball's `colorHint`) and the web analysis panel legend,
+ * so a role's swatch always matches its ball in the rendered video.
+ */
+export const ROLE_COLORS: Record<HitRole, string> = {
+  kick: '#ff6b6b',
+  bass: '#ffa94d',
+  snare: '#ffd43b',
+  percussion: '#63e6be',
+  melodic: '#4dabf7',
+  piano: '#b197fc',
+  guitar: '#f783ac',
+  vocal: '#a9e34b',
+};
+
+/** Human-friendly instrument label per role (for UI and ball labels). */
+export const ROLE_LABELS: Record<HitRole, string> = {
+  kick: 'Kick',
+  bass: 'Bass',
+  snare: 'Snare',
+  percussion: 'Percussion',
+  melodic: 'Melody',
+  piano: 'Piano',
+  guitar: 'Guitar',
+  vocal: 'Vocals',
+};
+
+/**
+ * Number of time bins in {@link AudioAnalysisSummary.roleActivity}. A fixed
+ * count keeps the payload small and the UI layout stable regardless of song
+ * length.
+ */
+export const ROLE_ACTIVITY_BINS = 56;
+
+/**
+ * Analyzer strategies that produce rhythmic events from an audio waveform.
+ * `stems` is the neural per-instrument analyzer (Demucs source separation);
+ * the others are librosa-based.
+ */
+export type AudioAnalysisMode = 'smart' | 'beats' | 'onsets' | 'stems';
 
 /**
  * A single musical note or salient audio hit produced by Stage B.
@@ -99,6 +165,15 @@ export interface AudioAnalysisSummary {
   durationSec: number;
   hitCount: number;
   roleCounts: Record<HitRole, number>;
+  /**
+   * Per-role activity over time. For each role, a {@link ROLE_ACTIVITY_BINS}-
+   * length array of normalized `[0, 1]` intensity bins spanning
+   * `[0, durationSec]`, so the UI can show *when* each instrument plays, not
+   * just its total count. Each role is normalized against its own peak bin, so
+   * the strip reveals an instrument's temporal pattern independent of absolute
+   * loudness. Roles with no hits are all-zero.
+   */
+  roleActivity: Record<HitRole, number[]>;
   sectionCues: SectionCue[];
   energyTimeline: AudioEnergySample[];
 }

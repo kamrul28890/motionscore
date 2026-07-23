@@ -72,6 +72,7 @@ The server cleans up temporary files (uploads + outputs) after 30 minutes.
 - **ffmpeg** on PATH ([download](https://ffmpeg.org/download.html)) — required for video export
 - **Python 3 + librosa** — needed for the default smart/beats/onsets audio modes
 - **Basic Pitch** (optional) — needed only for `--mode notes` full transcription
+- **PyTorch + Demucs** (optional) — needed only for `--mode stems` neural per-instrument separation (GPU recommended; a 6 GB VRAM card is enough)
 
 Smart/beats/onsets analysis currently accepts up to 12 minutes per file to bound decoded-audio and HPSS memory. Split longer mixes before processing.
 
@@ -114,6 +115,8 @@ PYTHON=.venv/Scripts/python.exe
 
 **Optional full note transcription:** `--mode notes` additionally requires Basic Pitch. Run `scripts/setup-basic-pitch.ps1` (Windows) or `scripts/setup-basic-pitch.sh` (macOS/Linux); it reuses the same `.venv`.
 
+**Optional neural per-instrument separation:** `--mode stems` additionally requires PyTorch + Demucs. Run `scripts/setup-demucs.ps1` (Windows) or `scripts/setup-demucs.sh` (macOS/Linux); it reuses the same `.venv` and installs a CUDA build by default (pass `-Cpu` / `--cpu` for a CPU-only build). The ~170 MB `htdemucs_6s` model downloads automatically on first use. Stems mode separates the mix into real instruments (drums, bass, guitar, piano, vocals, other), so `--balls per-role` gives a genuine guitar/piano/vocal/bass/drum ball each instead of frequency-band guesses.
+
 **Manual equivalent for the lightweight analyzer:**
 
 ```bash
@@ -140,7 +143,8 @@ Options:
   --width <number>        video width in pixels (default: 1920)
   --height <number>       video height in pixels (default: 1080)
   --layout <type>         target layout strategy (choices: "piano-keys", "lanes", default: "piano-keys")
-  --mode <mode>           audio hit selection: "auto", "beats", "onsets", or "notes" (default: "auto")
+  --mode <mode>           audio hit selection: "auto", "beats", "onsets", "notes", or "stems" (default: "auto")
+  --balls <mode>          how many balls: "single" or "per-role" (one ball per instrument) (default: "single")
   --verbose               print progress information for each pipeline stage
   -h, --help              display help for command
 ```
@@ -161,6 +165,12 @@ npx motionscore song.wav -o video.mp4
 npx motionscore song.wav -o beats.mp4 --mode beats     # sparse metrical pulse
 npx motionscore song.wav -o onsets.mp4 --mode onsets   # all full-mix attacks
 npx motionscore solo.wav -o notes.mp4 --mode notes     # Basic Pitch transcription
+npx motionscore song.mp3 -o stems.mp4 --mode stems     # neural per-instrument (Demucs)
+
+# One ball per detected instrument role. With --mode stems these are real
+# instruments (guitar, piano, vocal, bass, drums); otherwise frequency-band
+# roles (kick, bass, snare, percussion, melodic).
+npx motionscore song.mp3 -o multiball.mp4 --mode stems --balls per-role
 
 # Verbose output showing per-stage timing
 npx motionscore song.mid -o video.mp4 --verbose

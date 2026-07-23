@@ -29,10 +29,13 @@ import { performance } from 'node:perf_hooks';
 import {
   validateNoteEvents,
   validateChoreographyTargets,
-  validateObjectTrajectory,
+  validateChoreography,
+  ROLE_ACTIVITY_BINS,
+  ROLE_ORDER,
   type AudioAnalysis,
   type AudioAnalysisSummary,
   type AudioEnergySample,
+  type Choreography,
   type HitRole,
   type NoteEvent,
   type ChoreographyTarget,
@@ -40,11 +43,12 @@ import {
   type LayoutConfig,
   type SolverConfig,
   type RenderConfig,
+  type VoiceGrouping,
 } from '@motionscore/types';
 import { extractWithAnalysis } from '@motionscore/note-extractor';
-import { mapNotes } from '@motionscore/musical-mapper';
-import { solveTrajectory } from '@motionscore/trajectory-solver';
-import { render, renderAndEncode } from '@motionscore/renderer';
+import { mapNotes, planVoices } from '@motionscore/musical-mapper';
+import { solveChoreography } from '@motionscore/trajectory-solver';
+import { render, renderAndEncodeVoices, type RenderVoice } from '@motionscore/renderer';
 import { exportVideo, type ExportProgressCallback } from '@motionscore/video-export';
 
 import { assertInputReadable, type ParsedArgs } from './args.js';
@@ -81,21 +85,65 @@ const MAX_ENERGY_SAMPLES = 160;
 
 /** Project a full {@link AudioAnalysis} into the compact UI-facing summary. */
 function summarizeAnalysis(analysis: AudioAnalysis): AudioAnalysisSummary {
-  const roleCounts = { kick: 0, bass: 0, snare: 0, percussion: 0, melodic: 0 } as Record<
-    HitRole,
-    number
-  >;
+  const roleCounts: Record<HitRole, number> = {
+    kick: 0,
+    bass: 0,
+    snare: 0,
+    percussion: 0,
+    melodic: 0,
+    vocal: 0,
+    piano: 0,
+    guitar: 0,
+  };
+  const roleActivity: Record<HitRole, number[]> = {
+    kick: new Array<number>(ROLE_ACTIVITY_BINS).fill(0),
+    bass: new Array<number>(ROLE_ACTIVITY_BINS).fill(0),
+    snare: new Array<number>(ROLE_ACTIVITY_BINS).fill(0),
+    percussion: new Array<number>(ROLE_ACTIVITY_BINS).fill(0),
+    melodic: new Array<number>(ROLE_ACTIVITY_BINS).fill(0),
+    vocal: new Array<number>(ROLE_ACTIVITY_BINS).fill(0),
+    piano: new Array<number>(ROLE_ACTIVITY_BINS).fill(0),
+    guitar: new Array<number>(ROLE_ACTIVITY_BINS).fill(0),
+  };
+
+  // Bin each roled hit by its onset time, accumulating velocity, so the UI can
+  // show when each instrument is active over the song.
+  const durationSec = analysis.durationSec > 0 ? analysis.durationSec : 0;
   for (const hit of analysis.hits) {
-    if (hit.role !== undefined) {
-      roleCounts[hit.role] += 1;
+    if (hit.role === undefined) {
+      continue;
+    }
+    roleCounts[hit.role] += 1;
+    const frac = durationSec > 0 ? hit.startSec / durationSec : 0;
+    const bin = Math.max(
+      0,
+      Math.min(ROLE_ACTIVITY_BINS - 1, Math.floor(frac * ROLE_ACTIVITY_BINS)),
+    );
+    roleActivity[hit.role]![bin]! += hit.velocity > 0 ? hit.velocity : 1;
+  }
+
+  // Normalize each role against its own peak bin: the strip reveals an
+  // instrument's temporal pattern independent of absolute loudness.
+  for (const role of ROLE_ORDER) {
+    const bins = roleActivity[role]!;
+    let max = 0;
+    for (const value of bins) {
+      if (value > max) max = value;
+    }
+    if (max > 0) {
+      for (let i = 0; i < bins.length; i += 1) {
+        bins[i] = Math.round((bins[i]! / max) * 1000) / 1000;
+      }
     }
   }
+
   return {
     mode: analysis.mode,
     tempoBpm: analysis.tempoBpm,
     durationSec: analysis.durationSec,
     hitCount: analysis.hits.length,
     roleCounts,
+    roleActivity,
     sectionCues: analysis.sectionCues,
     energyTimeline: downsampleEnergy(analysis.featureFrames, MAX_ENERGY_SAMPLES),
   };
@@ -336,7 +384,15 @@ export async function runPipeline(parsed: ParsedArgs): Promise<PipelineResult> {
     const extraction = await extractWithAnalysis(options.input, { mode: options.mode });
     const notes: NoteEvent[] = extraction.notes;
     const analyzedDurationSec = extraction.audioAnalysis?.durationSec;
-    stageDone(verbose, 'extract notes (Stage B)', startedAt, `${notes.length} notes`);
+    // Report the RESOLVED mode (e.g. auto -> smart, or stems) so it is obvious
+    // which analyzer ran — only `stems` uses the GPU.
+    const analyzedMode = extraction.audioAnalysis?.mode;
+    stageDone(
+      verbose,
+      'extract notes (Stage B)',
+      startedAt,
+      analyzedMode ? `${analyzedMode} mode, ${notes.length} notes` : `${notes.length} notes`,
+    );
 
     // Stage B -> C boundary validation (Req 8.1).
     validateNoteEvents(notes);
@@ -360,7 +416,11 @@ export async function runPipeline(parsed: ParsedArgs): Promise<PipelineResult> {
     validateChoreographyTargets(targets, width, height, notes);
     logVerbose(verbose, `validated ${targets.length} targets (Stage C->D boundary)`);
 
-    // --- Stage D: solve trajectory ----------------------------------------
+    // --- Stage D: plan voices + solve per-ball trajectories ---------------
+    // Targets are partitioned into one or more balls (`planVoices`), and each
+    // ball is solved independently (`solveChoreography`). `balls: 'single'`
+    // (default) yields one ball over all targets — identical to the legacy
+    // behavior. See docs/MULTI_BALL_PLAN.md.
     startedAt = stageStart(verbose, 'solve trajectory (Stage D)');
     const solverConfig: SolverConfig = {
       gravity,
@@ -368,23 +428,48 @@ export async function runPipeline(parsed: ParsedArgs): Promise<PipelineResult> {
       fps,
       syncToleranceMs: SYNC_TOLERANCE_MS,
     };
-    let trajectory: ObjectTrajectory = solveTrajectory(targets, solverConfig);
-    const requestedDurationSec = Math.max(
-      analyzedDurationSec ?? 0,
-      computeDurationSec(trajectory, notes),
+    const grouping: VoiceGrouping = options.balls ?? 'single';
+    const voicePlans = planVoices(targets, grouping, layoutConfig);
+    const solved = solveChoreography(voicePlans, solverConfig);
+
+    // Hold every ball through the full source duration so the video does not end
+    // on the last hit while audio continues.
+    const solvedDurationSec = solved.voices.reduce(
+      (max, voice) => Math.max(max, computeDurationSec(voice.trajectory, notes)),
+      0,
     );
-    trajectory = extendTrajectoryToDuration(trajectory, requestedDurationSec);
-    const impactCount = trajectory.keyframes.filter((kf) => kf.hitsTarget !== undefined).length;
+    const requestedDurationSec = Math.max(analyzedDurationSec ?? 0, solvedDurationSec);
+    const choreography: Choreography = {
+      durationSec: requestedDurationSec,
+      voices: solved.voices.map((voice) => ({
+        ...voice,
+        trajectory: extendTrajectoryToDuration(voice.trajectory, requestedDurationSec),
+      })),
+    };
+
+    const impactCount = choreography.voices.reduce(
+      (sum, voice) =>
+        sum + voice.trajectory.keyframes.filter((kf) => kf.hitsTarget !== undefined).length,
+      0,
+    );
     stageDone(
       verbose,
       'solve trajectory (Stage D)',
       startedAt,
-      `${trajectory.keyframes.length} keyframes, ${impactCount} impacts`,
+      `${choreography.voices.length} voice(s), ${impactCount} impacts`,
     );
 
-    // Stage D -> E boundary validation (Req 8.3).
-    validateObjectTrajectory(trajectory, targets, SYNC_TOLERANCE_MS);
-    logVerbose(verbose, `validated trajectory (Stage D->E boundary)`);
+    // Stage D -> E boundary validation (Req 8.3), per voice.
+    validateChoreography(choreography, width, height, SYNC_TOLERANCE_MS, notes);
+    logVerbose(
+      verbose,
+      `validated ${choreography.voices.length} voice(s) (Stage D->E boundary)`,
+    );
+
+    const maxSyncErrorMs = choreography.voices.reduce(
+      (max, voice) => Math.max(max, computeMaxSyncErrorMs(voice.trajectory, voice.targets)),
+      0,
+    );
 
     // --- ffmpeg pre-flight (fail fast before rendering; design Error #4) ---
     startedAt = stageStart(verbose, 'check ffmpeg available');
@@ -409,9 +494,14 @@ export async function runPipeline(parsed: ParsedArgs): Promise<PipelineResult> {
       parallelFrames: options.parallelFrames ?? (await import('node:os')).availableParallelism(),
     };
 
-    const streamResult = await renderAndEncode(
-      trajectory,
-      targets,
+    const renderVoices: RenderVoice[] = choreography.voices.map((voice) => ({
+      trajectory: voice.trajectory,
+      targets: voice.targets,
+      ballColor: voice.colorHint,
+    }));
+
+    const streamResult = await renderAndEncodeVoices(
+      renderVoices,
       renderConfig,
       {
         outputPath: options.output,
@@ -436,8 +526,8 @@ export async function runPipeline(parsed: ParsedArgs): Promise<PipelineResult> {
       stats: {
         totalNotes: notes.length,
         renderedFrames: streamResult.renderedFrames,
-        durationSec: computeDurationSec(trajectory, notes),
-        maxSyncErrorMs: computeMaxSyncErrorMs(trajectory, targets),
+        durationSec: requestedDurationSec,
+        maxSyncErrorMs,
       },
     };
     if (extraction.audioAnalysis !== undefined) {

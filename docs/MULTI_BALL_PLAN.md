@@ -1,8 +1,12 @@
 # Multi-Ball Plan (Multi-Voice Choreography)
 
-Status: Phase 1 in progress. This document is the design of record for giving
-each musical "voice" its own ball, and the staged plan to get there without
-breaking the current single-ball pipeline.
+Status: Phases 1 and 2 complete — multi-ball renders end to end via the
+streaming path and is exposed as `--balls per-role` (CLI) / a "Balls" selector
+(web), default `single`. Phase 3 is partially done: the neural `stems` mode
+(Demucs `htdemucs_6s`) now feeds real per-instrument roles into `per-role`, so a
+song can render a genuine guitar/piano/vocal/bass/drum ball each. This document
+is the design of record for giving each musical "voice" its own ball. Remaining:
+Phase 3 librosa voice-aware merging + collision/density tuning, and Phase 4 (3D).
 
 ## Motivation
 
@@ -16,12 +20,15 @@ improves fidelity, not just visuals.
 
 ## Important scoping reality
 
-We do not have true per-instrument stems. The smart analyzer classifies hits
-into roles (kick, bass, snare, percussion, melodic) from HPSS + frequency-band
-onsets. So the honest, achievable feature is "a ball per role/voice group,"
-e.g. drums vs bass vs melody. True per-instrument balls (e.g. guitar vs piano)
-would require real source separation (the optional future Demucs mode) feeding
-the same voice model — no contract change needed when that arrives.
+Two analyzers feed the voice model. The `smart`/`beats`/`onsets` librosa
+analyzer classifies hits into roles (kick, bass, snare, percussion, melodic)
+from HPSS + frequency-band onsets — so with those modes the honest feature is
+"a ball per role/voice group," e.g. drums vs bass vs melody. The `stems` mode
+(Demucs `htdemucs_6s`, shipped) does real source separation, so it emits true
+per-instrument roles (kick/snare/percussion/bass/piano/guitar/vocal/melodic) and
+`per-role` gives an actual guitar ball, piano ball, vocal ball, etc. Both
+analyzers emit the identical `NoteEvent` contract, so the voice model needed no
+change to gain real instruments.
 
 ## Why this comes before the 3D renderer
 
@@ -69,8 +76,11 @@ guarantee.
 
 - `single` (default initially): one voice, all targets, one ball. Identical to
   current output.
-- `per-role`: one voice per `HitRole` that actually appears in the targets.
-  MIDI (which has no roles) and `notes` mode fall back to `single`.
+- `per-role`: one voice per `HitRole` that actually appears in the targets. With
+  `smart` this is up to five roles; with `stems` it is up to eight real
+  instruments (only the roles actually present survive the stem energy gate, so
+  a solo piano yields a single piano ball). MIDI (which has no roles) and
+  `notes` mode fall back to `single`.
 - Future `custom`: named groupings (e.g. all-drums = one ball, melodic = one
   ball) via config; no contract change required.
 
@@ -117,21 +127,60 @@ user opts in.
 
 ## Phased plan
 
-- Phase 1 (foundation, no behavior change):
-  - 1a: `Voice` / `Choreography` / `VoiceGrouping` contracts + validator + exports.
+- Phase 1 — DONE (foundation, no behavior change):
+  - 1a: `Voice` / `VoicePlan` / `Choreography` / `VoiceGrouping` contracts +
+    `validateChoreography` + exports.
   - 1b: `planVoices(targets, grouping, layout)` in musical-mapper; default
     `single` reproduces current output; unit tests.
   - 1c: `solveChoreography(voices, config)` in trajectory-solver; per-voice
     start positions; unit tests.
-- Phase 2 (visible multi-ball in the current 2D renderer):
-  - Generalize the renderer to N balls; wire the pipeline to
-    `planVoices -> solveChoreography -> render voices`; add the `balls` option
-    to config/CLI/web; update tests; verify an end-to-end multi-ball render.
-- Phase 3 (fidelity): voice-aware merging in the analyzer; per-role start-lane
-  and collision-avoidance tuning.
-- Phase 4 (3D): the `voices[]` model feeds the future Three.js scene planner
-  (see `ARCHITECTURE.md` and the rendering discussion). Multi-ball is native
-  there rather than retrofitted.
+- Phase 2 — DONE (visible multi-ball in the current 2D renderer):
+  - `renderAndEncodeVoices` draws N tinted balls/trails and all impacts;
+    `renderAndEncode` is now a single-ball wrapper over it.
+  - Pipeline wires `planVoices -> solveChoreography -> extend-to-duration ->
+    validateChoreography -> renderAndEncodeVoices`.
+  - `balls` option added to `CLIOptions`, `--balls`, and the web form (default
+    `single`). Verified end to end (`--balls per-role` on a real track produced
+    5 tinted balls, one per detected role, 0.00 ms sync error).
+  - Note: the PNG `render()` fallback in `render.ts` is only used by tests and
+    remains single-ball; the production streaming path is multi-ball.
+- Phase 3 — PARTIALLY DONE (fidelity):
+  - DONE: neural `stems` mode (Demucs `htdemucs_6s`) delivers real per-instrument
+    roles, so `per-role` gets true instrument balls (see the roadmap below).
+    Thinning is role-aware (merge within a role, keep simultaneous cross-role
+    hits).
+  - TODO: voice-aware merging in the *librosa* analyzer; per-role start-lane and
+    collision tuning; density tuning for stems mode (its raw onset count is high
+    before thinning).
+- Phase 4 — TODO (3D): the `voices[]` model feeds the future Three.js scene
+  planner. Multi-ball is native there rather than retrofitted.
+
+## Neural upgrade roadmap (optional, post multi-ball)
+
+The current role labels come from HPSS + fixed frequency bands, so they are only
+meaningful for percussive/electronic material — e.g. a solo piano is mislabeled
+as kick/bass/snare (the onsets are real; the names are not). The multi-voice
+model is designed to consume better sources without any contract change:
+
+- Stems — DONE (`--mode stems`). Demucs `htdemucs_6s` splits a mix into six
+  stems: `drums`, `bass`, `other`, `vocals`, `guitar`, `piano`. Per-stem onset
+  detection runs on each; the isolated `drums` stem is band-split into
+  kick/snare/percussion, and `bass`/`other`/`vocals`/`guitar`/`piano` become
+  their own roles. A per-stem RMS energy gate drops near-silent bleed stems so an
+  isolated instrument does not spawn phantom hits. This replaces the
+  frequency-band heuristic with real separation and directly fixes the
+  mislabeling. It is heavy (PyTorch + ~170 MB model, GPU recommended; a 6 GB
+  VRAM card is enough), so it is an opt-in mode, not the librosa default. Set it
+  up with `scripts/setup-demucs.*`. Implemented in
+  `packages/note-extractor/python/extract_stems.py`.
+- Onsets — madmom's neural drum/beat detectors are stronger than volume-based
+  onset picking for rhythm-game-style timing; a candidate for per-stem onsets.
+- Structure — Essentia (pretrained segmentation) or MSAF for build/drop/section
+  boundaries, replacing the current heuristic cue detector for higher accuracy.
+
+Integration point: each of these feeds the SAME `NoteEvent` (with `role`,
+`source`) and `SectionCue` contracts, so they slot in as an alternate Stage B
+analyzer selected by mode/flag. No downstream (mapper/solver/renderer) change.
 
 ## How the "tower / staircase bounce" aesthetic fits
 

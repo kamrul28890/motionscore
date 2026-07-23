@@ -50,10 +50,13 @@ export {
  * - `'beats'`  — metrical pulse tracking. Sparse, but may omit fills and
  *   syncopated instrumental accents.
  * - `'onsets'` — all full-mix attacks. Denser and less selective than auto.
+ * - `'stems'`  — neural per-instrument separation (Demucs `htdemucs_6s`):
+ *   isolates drums/bass/vocals/other/guitar/piano and detects onsets per stem,
+ *   so each ball maps to a real instrument. Needs PyTorch + Demucs.
  * - `'notes'`  — full pitched transcription (Basic Pitch). Dense; suits sparse
  *   solo/instrumental recordings, and matches direct-MIDI fidelity.
  */
-export type ExtractionMode = 'auto' | 'notes' | 'beats' | 'onsets';
+export type ExtractionMode = 'auto' | 'notes' | 'beats' | 'onsets' | 'stems';
 
 /** Options controlling {@link extract}. */
 export interface ExtractOptions {

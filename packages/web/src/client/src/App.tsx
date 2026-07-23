@@ -7,10 +7,12 @@ import { AnalysisPanel } from './components/AnalysisPanel.js';
 
 export type AppState = 'idle' | 'uploading' | 'generating' | 'complete' | 'error';
 
-export type ExtractionMode = 'auto' | 'beats' | 'onsets' | 'notes';
+export type ExtractionMode = 'auto' | 'beats' | 'onsets' | 'stems' | 'notes';
+export type BallMode = 'single' | 'per-role';
 
 export interface GenerateOptions {
   mode: ExtractionMode;
+  balls: BallMode;
   fps: number;
   width: number;
   height: number;
@@ -28,7 +30,15 @@ export interface PipelineStats {
   maxSyncErrorMs: number;
 }
 
-export type HitRole = 'kick' | 'bass' | 'snare' | 'percussion' | 'melodic';
+export type HitRole =
+  | 'kick'
+  | 'bass'
+  | 'snare'
+  | 'percussion'
+  | 'melodic'
+  | 'vocal'
+  | 'piano'
+  | 'guitar';
 
 export interface SectionCue {
   type: 'build' | 'drop' | 'breakdown' | 'rise' | 'fall';
@@ -46,11 +56,13 @@ export interface AudioEnergySample {
 }
 
 export interface AudioAnalysisSummary {
-  mode: 'smart' | 'beats' | 'onsets';
+  mode: 'smart' | 'beats' | 'onsets' | 'stems';
   tempoBpm: number;
   durationSec: number;
   hitCount: number;
   roleCounts: Record<HitRole, number>;
+  /** Per-role normalized [0,1] activity bins over the song (see server contract). */
+  roleActivity: Record<HitRole, number[]>;
   sectionCues: SectionCue[];
   energyTimeline: AudioEnergySample[];
 }
@@ -70,6 +82,7 @@ export function App() {
   const [file, setFile] = useState<File | null>(null);
   const [options, setOptions] = useState<GenerateOptions>({
     mode: 'auto',
+    balls: 'single',
     fps: 60,
     width: 1920,
     height: 1080,
@@ -99,6 +112,7 @@ export function App() {
     const formData = new FormData();
     formData.append('file', file);
     formData.append('mode', options.mode);
+    formData.append('balls', options.balls);
     formData.append('fps', String(options.fps));
     formData.append('width', String(options.width));
     formData.append('height', String(options.height));

@@ -33,6 +33,7 @@ describe('parseArgs', () => {
       height: 1080,
       layout: 'piano-keys',
       mode: 'auto',
+      balls: 'single',
       verbose: false,
     });
     expect(inputType).toBe('midi');
@@ -53,6 +54,8 @@ describe('parseArgs', () => {
       'lanes',
       '--mode',
       'onsets',
+      '--balls',
+      'per-role',
       '--verbose',
     ]);
 
@@ -64,6 +67,7 @@ describe('parseArgs', () => {
       height: 720,
       layout: 'lanes',
       mode: 'onsets',
+      balls: 'per-role',
       verbose: true,
     });
     // Numeric flags must be numbers, not the raw argv strings.
@@ -83,6 +87,12 @@ describe('parseArgs', () => {
 
   it('rejects an invalid --layout choice', () => {
     expect(() => parseArgs(['song.mid', '-o', 'out.mp4', '--layout', 'spiral'])).toThrow(
+      CommanderError,
+    );
+  });
+
+  it('rejects an invalid --balls choice', () => {
+    expect(() => parseArgs(['song.mid', '-o', 'out.mp4', '--balls', 'many'])).toThrow(
       CommanderError,
     );
   });

@@ -8,7 +8,7 @@
 
 import { createServer } from 'node:http';
 import { existsSync, mkdirSync, rmSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
@@ -30,20 +30,61 @@ import type { AudioAnalysisSummary, CLIOptions } from '@motionscore/types';
 
 const __filename = fileURLToPath(import.meta.url);
 const __serverDir = fileURLToPath(new URL('.', import.meta.url));
-// Project root is two levels up from packages/web/src/ (or packages/web/dist/)
+// Project root is three levels up from packages/web/src/ (or packages/web/dist/)
 const PROJECT_ROOT = resolve(__serverDir, '..', '..', '..');
 
-if (!process.env.PYTHON) {
-  // Windows: .venv/Scripts/python.exe  |  POSIX: .venv/bin/python
-  const candidates = [
-    join(PROJECT_ROOT, '.venv', 'Scripts', 'python.exe'),
-    join(PROJECT_ROOT, '.venv', 'bin', 'python'),
+// Resolve the Python executable used for audio analysis (librosa / Basic Pitch /
+// Demucs). The server must "just work" after a setup script and tolerate a
+// PYTHON value that is relative (e.g. ".\.venv\Scripts\python.exe") or points at
+// a venv that no longer exists — the server's cwd is not guaranteed to be the
+// project root, so a relative path would otherwise fail to spawn.
+{
+  const venvCandidates = [
+    join(PROJECT_ROOT, '.venv', 'Scripts', 'python.exe'), // Windows
+    join(PROJECT_ROOT, '.venv', 'bin', 'python'), // POSIX
   ];
-  const found = candidates.find((p) => existsSync(p));
-  if (found) {
-    process.env.PYTHON = found;
-    console.log(`[motionscore-web] Auto-detected venv Python: ${found}`);
+  const detectVenv = (): string | undefined => venvCandidates.find((p) => existsSync(p));
+
+  const configured = process.env.PYTHON?.trim();
+  let resolvedPython: string | undefined;
+
+  if (configured) {
+    const looksLikePath = configured.includes('/') || configured.includes('\\');
+    if (!looksLikePath) {
+      // Bare command such as "python" / "python3": trust PATH resolution as-is.
+      resolvedPython = configured;
+    } else {
+      // Make a relative path absolute against the project root, then verify it.
+      const abs = isAbsolute(configured) ? configured : resolve(PROJECT_ROOT, configured);
+      if (existsSync(abs)) {
+        resolvedPython = abs;
+      } else {
+        const fallback = detectVenv();
+        if (fallback) {
+          console.warn(
+            `[motionscore-web] PYTHON="${configured}" was not found (resolved to ${abs}); ` +
+              `using detected venv Python instead: ${fallback}`,
+          );
+          resolvedPython = fallback;
+        } else {
+          // Keep the absolute form so the downstream error names a real path and
+          // the setup hint still guides the user.
+          resolvedPython = abs;
+        }
+      }
+    }
+  } else {
+    resolvedPython = detectVenv();
   }
+
+  if (resolvedPython) {
+    process.env.PYTHON = resolvedPython;
+  }
+  console.log(
+    `[motionscore-web] Python for audio analysis: ${
+      process.env.PYTHON ?? '(none set — run scripts/setup-audio and set PYTHON)'
+    }`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -285,8 +326,10 @@ app.post('/api/generate', upload.single('file'), async (req: Request, res: Respo
   const width = req.body.width ? parseInt(req.body.width, 10) : 1920;
   const height = req.body.height ? parseInt(req.body.height, 10) : 1080;
   const layout = req.body.layout === 'lanes' ? 'lanes' : 'piano-keys';
-  const ALLOWED_MODES = ['auto', 'beats', 'onsets', 'notes'];
+  const ALLOWED_MODES = ['auto', 'beats', 'onsets', 'stems', 'notes'];
   const mode = ALLOWED_MODES.includes(req.body.mode) ? req.body.mode : 'auto';
+  const ALLOWED_BALLS = ['single', 'per-role'];
+  const balls = ALLOWED_BALLS.includes(req.body.balls) ? req.body.balls : 'single';
   const codec = req.body.codec || undefined;
   const gpuDevice = req.body.gpuDevice !== undefined ? parseInt(req.body.gpuDevice, 10) : undefined;
   const preset = req.body.preset || undefined;
@@ -325,6 +368,7 @@ app.post('/api/generate', upload.single('file'), async (req: Request, res: Respo
       input: inputPath,
       output: outputPath,
       mode,
+      balls,
       fps,
       width,
       height,

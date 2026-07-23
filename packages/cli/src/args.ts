@@ -31,10 +31,16 @@ type Layout = (typeof LAYOUTS)[number];
 const DEFAULT_LAYOUT: Layout = 'piano-keys';
 
 /** Supported extraction modes; the first entry is the default. */
-const MODES = ['auto', 'beats', 'onsets', 'notes'] as const;
+const MODES = ['auto', 'beats', 'onsets', 'stems', 'notes'] as const;
 type Mode = (typeof MODES)[number];
 /** Default extraction mode when `--mode` is omitted. */
 const DEFAULT_MODE: Mode = 'auto';
+
+/** Supported ball-grouping strategies; the first entry is the default. */
+const BALLS = ['single', 'per-role'] as const;
+type Balls = (typeof BALLS)[number];
+/** Default ball grouping when `--balls` is omitted. */
+const DEFAULT_BALLS: Balls = 'single';
 
 /** Extensions routed to the MIDI parser (lower-cased, leading dot included). */
 const MIDI_EXTENSIONS: ReadonlySet<string> = new Set(['.mid', '.midi']);
@@ -69,6 +75,7 @@ interface RawCliOptions {
   height: number;
   layout: Layout;
   mode: Mode;
+  balls: Balls;
   verbose: boolean;
 }
 
@@ -161,10 +168,20 @@ export function buildProgram(): Command {
       new Option(
         '--mode <mode>',
         'what the ball hits (audio only): auto (smart stem-aware attacks), ' +
-          'beats (metrical pulse), onsets (all full-mix attacks), or notes (full transcription)',
+          'beats (metrical pulse), onsets (all full-mix attacks), stems (neural ' +
+          'per-instrument separation, needs PyTorch+Demucs), or notes (full transcription)',
       )
         .choices(MODES)
         .default(DEFAULT_MODE),
+    )
+    .addOption(
+      new Option(
+        '--balls <mode>',
+        'how many balls to render (audio only): single (one ball hits ' +
+          'everything) or per-role (one ball per instrument role)',
+      )
+        .choices(BALLS)
+        .default(DEFAULT_BALLS),
     )
     .option('--verbose', 'print progress information for each pipeline stage', false);
   return program;
@@ -220,6 +237,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     height: opts.height,
     layout: opts.layout,
     mode: opts.mode,
+    balls: opts.balls,
     verbose: opts.verbose,
   };
 

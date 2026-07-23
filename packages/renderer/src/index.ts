@@ -11,4 +11,4 @@
 
 export { render, RenderError, exceedsFailureBudget } from './render.js';
 export { interpolatePosition } from './interpolate.js';
-export { renderAndEncode } from './stream-render.js';
+export { renderAndEncode, renderAndEncodeVoices, type RenderVoice } from './stream-render.js';

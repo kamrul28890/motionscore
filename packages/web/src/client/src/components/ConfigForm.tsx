@@ -82,7 +82,8 @@ export function ConfigForm({ options, onChange, onGenerate, disabled, canGenerat
           onChange={(e) => update({ mode: e.target.value as GenerateOptions['mode'] })}
           disabled={disabled}
         >
-          <option value="auto">Auto — smart instrument-aware hits (recommended)</option>
+          <option value="auto">Auto — smart frequency-band hits (fast)</option>
+          <option value="stems">Stems — neural per-instrument (best; needs PyTorch+Demucs)</option>
           <option value="beats">Beats — metrical pulse (can miss fills)</option>
           <option value="onsets">Onsets — all full-mix attacks</option>
           <option value="notes">Notes — full transcription (most hits)</option>
@@ -90,6 +91,22 @@ export function ConfigForm({ options, onChange, onGenerate, disabled, canGenerat
         <span className="form-hint">
           Auto separates harmonic/percussive frequency layers, keeps salient attacks,
           and merges simultaneous hits. MIDI files always use their original notes.
+        </span>
+      </label>
+
+      <label className="form-field form-field-wide">
+        <span className="form-label">Balls</span>
+        <select
+          value={options.balls}
+          onChange={(e) => update({ balls: e.target.value as GenerateOptions['balls'] })}
+          disabled={disabled}
+        >
+          <option value="single">Single — one ball hits everything</option>
+          <option value="per-role">Per role — one ball per instrument (kick, bass, snare, ...)</option>
+        </select>
+        <span className="form-hint">
+          Per-role gives each detected instrument its own colored ball. Applies to audio;
+          MIDI uses a single ball.
         </span>
       </label>
 

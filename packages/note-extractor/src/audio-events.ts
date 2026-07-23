@@ -29,6 +29,8 @@ export type BeatExtractionMode = AudioEventExtractionMode;
 const PYTHON_ENV_VAR = 'PYTHON';
 const DEFAULT_PYTHON = 'python';
 const SCRIPT_PATH = fileURLToPath(new URL('../python/extract_events.py', import.meta.url));
+/** Neural per-instrument analyzer (Demucs stems); used only for `stems` mode. */
+const STEMS_SCRIPT_PATH = fileURLToPath(new URL('../python/extract_stems.py', import.meta.url));
 const EVENT_DURATION_SEC = 0.12;
 const MIN_EVENT_GAP_SEC = 0.09;
 const NOTE_ID_DIGITS = 4;
@@ -41,6 +43,9 @@ const HIT_ROLES: ReadonlySet<string> = new Set([
   'snare',
   'percussion',
   'melodic',
+  'vocal',
+  'piano',
+  'guitar',
 ]);
 const SECTION_CUE_TYPES: ReadonlySet<string> = new Set([
   'build',
@@ -55,6 +60,11 @@ const SETUP_HINT =
   '(scripts/setup-audio.ps1 on Windows, scripts/setup-audio.sh on macOS/Linux), ' +
   'then set the PYTHON environment variable to the venv Python (for example ' +
   '.venv/Scripts/python.exe or .venv/bin/python).';
+
+const STEMS_SETUP_HINT =
+  'Neural per-instrument analysis (mode "stems") needs PyTorch + Demucs (plus ' +
+  'librosa) in the Python env. Run scripts/setup-demucs.ps1 (Windows) or ' +
+  'scripts/setup-demucs.sh (macOS/Linux), then point PYTHON at that venv.';
 
 interface RawEvent {
   timeSec: number;
@@ -149,12 +159,14 @@ function runExtractor(
   mode: AudioEventExtractionMode,
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    const child = spawn(python, [SCRIPT_PATH, audioPath, outJson, mode], {
+    const script = mode === 'stems' ? STEMS_SCRIPT_PATH : SCRIPT_PATH;
+    const child = spawn(python, [script, audioPath, outJson, mode], {
       shell: false,
       env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
     });
 
     let stderr = '';
+    let forwardBuffer = '';
     let settled = false;
     let timeout: NodeJS.Timeout | undefined;
     const clearAnalyzerTimeout = (): void => {
@@ -177,7 +189,22 @@ function runExtractor(
     }, ANALYZER_TIMEOUT_MS);
 
     child.stderr.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString();
+      const text = chunk.toString();
+      stderr += text;
+      // Forward the analyzer's own "[motionscore]" progress markers (e.g. the
+      // stems separation device line) to this process's stderr so CLI verbose
+      // output and the web progress stream surface them live. Line-buffered so a
+      // marker split across chunks is not emitted twice or truncated.
+      forwardBuffer += text;
+      let newlineIndex = forwardBuffer.indexOf('\n');
+      while (newlineIndex !== -1) {
+        const line = forwardBuffer.slice(0, newlineIndex).trimEnd();
+        forwardBuffer = forwardBuffer.slice(newlineIndex + 1);
+        if (line.includes('[motionscore]')) {
+          process.stderr.write(`${line}\n`);
+        }
+        newlineIndex = forwardBuffer.indexOf('\n');
+      }
     });
 
     child.on('error', (cause: Error) => {
@@ -207,8 +234,9 @@ function runExtractor(
         return;
       }
       const detail = stderr.trim();
+      const hint = mode === 'stems' ? STEMS_SETUP_HINT : SETUP_HINT;
       const dependencyHint = /ModuleNotFoundError|No module named|ImportError/i.test(detail)
-        ? ` ${SETUP_HINT}`
+        ? ` ${hint}`
         : '';
       reject(
         new TranscriptionError(
@@ -392,17 +420,30 @@ function buildNoteEvents(rawEvents: readonly RawEvent[]): NoteEvent[] {
     .slice()
     .sort((a, b) => a.timeSec - b.timeSec);
 
+  // Thin PER ROLE: a single instrument (ball) cannot re-strike within the gap,
+  // but different roles may hit simultaneously (they are different balls). This
+  // preserves e.g. a piano onset that coincides with a kick. `smart` mode has
+  // already merged across roles in Python, so this is a near no-op there; for
+  // `stems` mode it keeps each instrument's independent hits.
   const selected: RawEvent[] = [];
+  const lastIndexByRole = new Map<string, number>();
   for (const event of sorted) {
-    const previous = selected[selected.length - 1];
-    if (previous !== undefined && event.timeSec - previous.timeSec < MIN_EVENT_GAP_SEC) {
-      if (eventPriority(event) > eventPriority(previous)) {
-        selected[selected.length - 1] = event;
+    const roleKey = event.role ?? '__none__';
+    const lastIndex = lastIndexByRole.get(roleKey);
+    if (
+      lastIndex !== undefined &&
+      event.timeSec - selected[lastIndex]!.timeSec < MIN_EVENT_GAP_SEC
+    ) {
+      if (eventPriority(event) > eventPriority(selected[lastIndex]!)) {
+        selected[lastIndex] = event;
       }
       continue;
     }
     selected.push(event);
+    lastIndexByRole.set(roleKey, selected.length - 1);
   }
+  // Replacements above can perturb ordering; restore global time order.
+  selected.sort((a, b) => a.timeSec - b.timeSec);
 
   return selected.map((event, index) => {
     const note: NoteEvent = {
@@ -477,7 +518,7 @@ function eventPriority(event: RawEvent): number {
 }
 
 function isAnalysisMode(value: string): value is AudioAnalysisMode {
-  return value === 'smart' || value === 'beats' || value === 'onsets';
+  return value === 'smart' || value === 'beats' || value === 'onsets' || value === 'stems';
 }
 
 function nonNegative(value: number): number {

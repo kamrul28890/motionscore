@@ -52,14 +52,21 @@ function clamp01(value: number): number {
   return value < 1 ? value : 1;
 }
 
+/** A single ball to render: its motion, the targets it strikes, and its tint. */
+export interface RenderVoice {
+  /** The solved motion for this ball. */
+  trajectory: ObjectTrajectory;
+  /** The targets (keys) associated with this ball. */
+  targets: ChoreographyTarget[];
+  /** Ball fill color; defaults to the shared white ball color. */
+  ballColor?: string;
+}
+
 /**
- * Render all frames and encode them directly to an MP4 via ffmpeg in a single
- * streaming pass. No intermediate PNG files are written to disk.
+ * Backward-compatible single-ball entry point (Stage E + F streaming). Delegates
+ * to {@link renderAndEncodeVoices} with one white ball.
  *
- * This combines Stage E (render) and Stage F (encode) into one pipeline:
- *   canvas.draw() → getImageData() → pipe raw RGBA → ffmpeg rawvideo → H.264 MP4
- *
- * @returns The output file path on success.
+ * @returns The output file path and number of frames rendered.
  */
 export async function renderAndEncode(
   trajectory: ObjectTrajectory,
@@ -68,41 +75,84 @@ export async function renderAndEncode(
   exportConfig: Pick<ExportConfig, 'outputPath' | 'fps' | 'codec' | 'gpuDevice' | 'preset' | 'quality'> & { audioPath?: string },
   onProgress?: (rendered: number, total: number) => void,
 ): Promise<{ outputPath: string; renderedFrames: number }> {
+  return renderAndEncodeVoices(
+    [{ trajectory, targets, ballColor: BALL_COLOR }],
+    renderConfig,
+    exportConfig,
+    onProgress,
+  );
+}
+
+/**
+ * Render one or more balls (voices) and encode directly to an MP4 via ffmpeg in
+ * a single streaming pass. No intermediate PNG files are written to disk.
+ *
+ * Every voice's targets are drawn as keys and every voice's impacts are shown;
+ * each voice gets its own tinted ball and trail. The frame count spans the
+ * longest voice, so shorter balls rest at their final position for the rest of
+ * the video.
+ *
+ * @returns The output file path and number of frames rendered.
+ */
+export async function renderAndEncodeVoices(
+  voices: readonly RenderVoice[],
+  renderConfig: RenderConfig,
+  exportConfig: Pick<ExportConfig, 'outputPath' | 'fps' | 'codec' | 'gpuDevice' | 'preset' | 'quality'> & { audioPath?: string },
+  onProgress?: (rendered: number, total: number) => void,
+): Promise<{ outputPath: string; renderedFrames: number }> {
   const { fps, width, height, backgroundColor, ballRadius } = renderConfig;
 
-  const { keyframes } = trajectory;
-  if (keyframes.length === 0) {
-    throw new RenderError('Cannot render: trajectory has no keyframes.');
+  const activeVoices = voices.filter((v) => v.trajectory.keyframes.length > 0);
+  if (activeVoices.length === 0) {
+    throw new RenderError('Cannot render: no voice has any keyframes.');
   }
 
-  const maxTSec = keyframes[keyframes.length - 1]!.tSec;
+  const maxTSec = activeVoices.reduce((max, v) => {
+    const kf = v.trajectory.keyframes;
+    return Math.max(max, kf[kf.length - 1]!.tSec);
+  }, 0);
   const totalFrames = Math.max(1, Math.ceil(maxTSec * fps) + 1);
 
-  // Precompute impacts
-  const targetsById = new Map<string, ChoreographyTarget>();
-  for (const target of targets) targetsById.set(target.noteId, target);
+  // Every voice's targets are drawn as keys.
+  const allTargets: ChoreographyTarget[] = [];
+  for (const v of voices) {
+    for (const target of v.targets) allTargets.push(target);
+  }
+
+  // Precompute impacts across all voices.
   const impacts: ImpactEvent[] = [];
-  for (const kf of keyframes) {
-    if (kf.hitsTarget === undefined) continue;
-    const target = targetsById.get(kf.hitsTarget);
-    impacts.push({
-      timeSec: kf.tSec,
-      x: target ? target.position.x : kf.pos[0],
-      y: target ? target.position.y : kf.pos[1],
-      color: target ? target.colorHint : BALL_COLOR,
-      impactSize: target ? clamp01(target.impactSize) : 0.5,
-    });
+  for (const v of voices) {
+    const targetsById = new Map<string, ChoreographyTarget>();
+    for (const target of v.targets) targetsById.set(target.noteId, target);
+    for (const kf of v.trajectory.keyframes) {
+      if (kf.hitsTarget === undefined) continue;
+      const target = targetsById.get(kf.hitsTarget);
+      impacts.push({
+        timeSec: kf.tSec,
+        x: target ? target.position.x : kf.pos[0],
+        y: target ? target.position.y : kf.pos[1],
+        color: target ? target.colorHint : (v.ballColor ?? BALL_COLOR),
+        impactSize: target ? clamp01(target.impactSize) : 0.5,
+      });
+    }
   }
 
   const drawTrail = renderConfig.showTrail === true;
   const drawParticles = renderConfig.particlesOnImpact !== false;
   const trailLength = Math.max(2, Math.round(fps * TRAIL_SECONDS));
 
-  // Precompute all positions
-  const allPositions: Array<[number, number]> = [];
-  for (let i = 0; i < totalFrames; i++) {
-    allPositions.push(interpolatePosition(keyframes, i / fps));
-  }
+  // Precompute per-voice frame positions; each voice keeps its own trail buffer.
+  const prepared = activeVoices.map((v) => {
+    const positions: Array<[number, number]> = [];
+    for (let i = 0; i < totalFrames; i++) {
+      positions.push(interpolatePosition(v.trajectory.keyframes, i / fps));
+    }
+    return {
+      positions,
+      color: v.ballColor ?? BALL_COLOR,
+      trail: [] as Array<[number, number]>,
+    };
+  });
 
   // Build ffmpeg command for rawvideo input
   const ffmpegBin = process.env.FFMPEG_PATH ?? 'ffmpeg';
@@ -166,27 +216,43 @@ export async function renderAndEncode(
     });
   });
 
+  // ffmpeg can exit early on an invalid config (e.g. odd width/height, which
+  // yuv420p rejects). Swallow stdin pipe errors so the real reason surfaces as
+  // the ExportError from the 'close' handler above, instead of crashing the
+  // process with an unhandled 'error' event.
+  ffmpeg.stdin!.on('error', () => {});
+
   // Render frames and stream to ffmpeg
   const canvas = createCanvas(width, height) as Canvas;
   const ctx = canvas.getContext('2d');
-  const trail: Array<[number, number]> = [];
 
   try {
     for (let i = 0; i < totalFrames; i++) {
-      const t = i / fps;
-      const ballPos = allPositions[i]!;
+      // If ffmpeg exited early (e.g. invalid config), stop writing so its
+      // failure surfaces cleanly via `await ffmpegDone` below rather than
+      // throwing a write-after-end error that skips it.
+      if (!ffmpeg.stdin!.writable) break;
 
-      trail.push(ballPos);
-      if (trail.length > trailLength) trail.shift();
+      const t = i / fps;
 
       // Draw frame
       ctx.globalAlpha = 1;
       ctx.fillStyle = backgroundColor;
       ctx.fillRect(0, 0, width, height);
-      drawTargets(ctx, targets, ballRadius);
-      if (drawTrail && trail.length >= 2) drawTrailLine(ctx, trail, ballRadius);
+      drawTargets(ctx, allTargets, ballRadius);
+
+      // Trails under everything, then impacts, then the balls on top.
+      if (drawTrail) {
+        for (const pv of prepared) {
+          pv.trail.push(pv.positions[i]!);
+          if (pv.trail.length > trailLength) pv.trail.shift();
+          if (pv.trail.length >= 2) drawTrailLine(ctx, pv.trail, ballRadius, pv.color);
+        }
+      }
       if (drawParticles) drawImpacts(ctx, impacts, t, ballRadius);
-      drawBall(ctx, ballPos, ballRadius);
+      for (const pv of prepared) {
+        drawBall(ctx, pv.positions[i]!, ballRadius, pv.color);
+      }
 
       // Get raw RGBA pixels and write to ffmpeg stdin
       const imageData = ctx.getImageData(0, 0, width, height);
@@ -194,8 +260,22 @@ export async function renderAndEncode(
 
       const canWrite = ffmpeg.stdin!.write(buffer);
       if (!canWrite) {
-        // Backpressure: wait for drain before continuing
-        await new Promise<void>((resolve) => { ffmpeg.stdin!.once('drain', resolve); });
+        // Backpressure: wait for drain, but also unblock if ffmpeg closed the
+        // pipe early so a failed encode surfaces via ffmpegDone instead of
+        // hanging. All three listeners are removed once any fires so they do
+        // not accumulate across the many backpressure waits in a long render.
+        const stdin = ffmpeg.stdin!;
+        await new Promise<void>((resolve) => {
+          const settle = (): void => {
+            stdin.removeListener('drain', settle);
+            stdin.removeListener('close', settle);
+            stdin.removeListener('error', settle);
+            resolve();
+          };
+          stdin.once('drain', settle);
+          stdin.once('close', settle);
+          stdin.once('error', settle);
+        });
       }
 
       if (onProgress && i % 50 === 0) {
@@ -225,8 +305,8 @@ function drawTargets(ctx: SKRSContext2D, targets: readonly ChoreographyTarget[],
   }
 }
 
-function drawTrailLine(ctx: SKRSContext2D, trail: ReadonlyArray<readonly [number, number]>, ballRadius: number): void {
-  ctx.strokeStyle = TRAIL_COLOR;
+function drawTrailLine(ctx: SKRSContext2D, trail: ReadonlyArray<readonly [number, number]>, ballRadius: number, color: string = TRAIL_COLOR): void {
+  ctx.strokeStyle = color;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
   for (let i = 1; i < trail.length; i++) {
@@ -262,9 +342,9 @@ function drawImpacts(ctx: SKRSContext2D, impacts: readonly ImpactEvent[], t: num
   ctx.globalAlpha = 1;
 }
 
-function drawBall(ctx: SKRSContext2D, pos: readonly [number, number], ballRadius: number): void {
+function drawBall(ctx: SKRSContext2D, pos: readonly [number, number], ballRadius: number, color: string = BALL_COLOR): void {
   ctx.globalAlpha = 1;
-  ctx.fillStyle = BALL_COLOR;
+  ctx.fillStyle = color;
   ctx.beginPath();
   ctx.arc(pos[0], pos[1], ballRadius, 0, Math.PI * 2);
   ctx.fill();

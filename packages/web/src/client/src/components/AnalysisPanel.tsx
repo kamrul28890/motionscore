@@ -1,19 +1,9 @@
-import type { AudioAnalysisSummary, HitRole, SectionCue } from '../App.js';
+import type { AudioAnalysisSummary, SectionCue } from '../App.js';
+import { ROLE_COLORS, ROLE_LABELS, ROLE_ORDER } from '../roleMeta.js';
 
 interface AnalysisPanelProps {
   analysis: AudioAnalysisSummary;
 }
-
-/** Fixed display order and labels for the role histogram. */
-const ROLE_ORDER: readonly HitRole[] = ['kick', 'bass', 'snare', 'percussion', 'melodic'];
-
-const ROLE_COLORS: Record<HitRole, string> = {
-  kick: '#ff6b6b',
-  bass: '#ffa94d',
-  snare: '#ffd43b',
-  percussion: '#63e6be',
-  melodic: '#4dabf7',
-};
 
 /** Colors per structural cue type, ordered from high-energy to low-energy. */
 const CUE_COLORS: Record<SectionCue['type'], string> = {
@@ -25,9 +15,10 @@ const CUE_COLORS: Record<SectionCue['type'], string> = {
 };
 
 const MODE_LABELS: Record<AudioAnalysisSummary['mode'], string> = {
-  smart: 'Smart (stem-aware)',
+  smart: 'Smart (frequency-band)',
   beats: 'Beats (metrical pulse)',
   onsets: 'Onsets (all attacks)',
+  stems: 'Stems (neural per-instrument)',
 };
 
 const SPARK_WIDTH = 1000;
@@ -57,7 +48,7 @@ function toPoints(
 
 export function AnalysisPanel({ analysis }: AnalysisPanelProps) {
   const { durationSec, energyTimeline, sectionCues } = analysis;
-  const maxRoleCount = Math.max(1, ...ROLE_ORDER.map((role) => analysis.roleCounts[role]));
+  const activeRoles = ROLE_ORDER.filter((role) => analysis.roleCounts[role] > 0);
 
   const loudnessPoints = toPoints(
     energyTimeline.map((s) => ({ timeSec: s.timeSec, value: s.loudness })),
@@ -98,28 +89,51 @@ export function AnalysisPanel({ analysis }: AnalysisPanelProps) {
         </div>
       </div>
 
-      {ROLE_ORDER.some((role) => analysis.roleCounts[role] > 0) && (
+      {activeRoles.length > 0 && (
         <div className="analysis-block">
-          <h3 className="analysis-subtitle">Hits by instrument role</h3>
-          <div className="role-bars">
-            {ROLE_ORDER.map((role) => {
-              const count = analysis.roleCounts[role];
+          <h3 className="analysis-subtitle">Instruments over time</h3>
+          <div className="role-activity">
+            {activeRoles.map((role) => {
+              const activity = analysis.roleActivity?.[role] ?? [];
+              const color = ROLE_COLORS[role];
+              const bins = Math.max(1, activity.length);
               return (
-                <div key={role} className="role-bar-row">
-                  <span className="role-name">{role}</span>
-                  <div className="role-bar-track">
-                    <div
-                      className="role-bar-fill"
-                      style={{
-                        width: `${(count / maxRoleCount) * 100}%`,
-                        background: ROLE_COLORS[role],
-                      }}
-                    />
-                  </div>
-                  <span className="role-count">{count}</span>
+                <div key={role} className="role-activity-row">
+                  <span className="role-label" title={`${ROLE_LABELS[role]} — matches its ball color`}>
+                    <i className="role-swatch" style={{ background: color }} />
+                    {ROLE_LABELS[role]}
+                  </span>
+                  <svg
+                    className="role-activity-strip"
+                    viewBox={`0 0 ${bins} 100`}
+                    preserveAspectRatio="none"
+                    role="img"
+                    aria-label={`${ROLE_LABELS[role]} activity over time`}
+                  >
+                    {activity.map((value, i) =>
+                      value > 0 ? (
+                        <rect
+                          key={i}
+                          x={i + 0.08}
+                          y={100 - value * 100}
+                          width={0.84}
+                          height={value * 100}
+                          fill={color}
+                        />
+                      ) : null,
+                    )}
+                  </svg>
+                  <span className="role-count" style={{ color }}>
+                    {analysis.roleCounts[role]}
+                  </span>
                 </div>
               );
             })}
+          </div>
+          <div className="role-activity-axis">
+            <span>{formatTime(0)}</span>
+            <span className="role-activity-caption">each row scaled to its own peak</span>
+            <span>{formatTime(durationSec)}</span>
           </div>
         </div>
       )}

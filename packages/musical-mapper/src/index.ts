@@ -9,6 +9,9 @@
 
 import {
   validateChoreographyTargets,
+  ROLE_COLORS,
+  ROLE_LABELS,
+  ROLE_ORDER,
   type ChoreographyTarget,
   type HitRole,
   type LayoutConfig,
@@ -276,13 +279,16 @@ function applyDensityFilter(
  * @returns Time-sorted choreography targets; length is <= `notes.length`.
  * @throws {ValidationError} if any produced target violates the contract.
  */
-const ROLE_LANE_POSITION = {
-  kick: 0.46,
-  bass: 0.34,
-  snare: 0.58,
-  percussion: 0.70,
-  melodic: 0.52,
-} as const;
+const ROLE_LANE_POSITION: Record<HitRole, number> = {
+  bass: 0.14,
+  kick: 0.26,
+  snare: 0.4,
+  percussion: 0.52,
+  guitar: 0.62,
+  piano: 0.72,
+  melodic: 0.82,
+  vocal: 0.9,
+};
 
 /** Keep analyzer-driven targets away from the extreme edges of the canvas. */
 const AUDIO_TARGET_MARGIN_FRACTION = 0.1;
@@ -399,20 +405,10 @@ export function mapNotes(
 /** Neutral ball tint for the single/combined voice (matches the renderer ball). */
 const DEFAULT_VOICE_COLOR = '#f5f5fa';
 
-/**
- * Per-role ball tint so multiple balls read as distinct. Kept in sync with the
- * web analysis panel's role palette for a consistent visual language.
- */
-const ROLE_VOICE_COLOR: Record<HitRole, string> = {
-  kick: '#ff6b6b',
-  bass: '#ffa94d',
-  snare: '#ffd43b',
-  percussion: '#63e6be',
-  melodic: '#4dabf7',
-};
-
-/** Fixed role order so per-role voices are produced deterministically. */
-const ROLE_ORDER: readonly HitRole[] = ['kick', 'bass', 'snare', 'percussion', 'melodic'];
+// Per-role ball tint (`ROLE_COLORS`), display label (`ROLE_LABELS`), and the
+// fixed per-role voice order (`ROLE_ORDER`) all come from @motionscore/types so
+// each ball's tint always matches the analysis panel's legend swatch and the
+// two never drift.
 
 /**
  * Launch-height fraction of the canvas, mirroring the pipeline's start-Y ratio
@@ -423,6 +419,29 @@ const LAUNCH_Y_RATIO = 100 / 1080;
 
 /** Horizontal lane center (fraction of width) for the single/combined voice. */
 const CENTER_LANE_FRACTION = 0.5;
+
+/** Minimum spacing (s) between hits one physical ball can strike. */
+const SINGLE_BALL_MIN_GAP_SEC = 0.09;
+
+/**
+ * Thin targets so a single ball can physically reach them: when two targets are
+ * closer than the min gap, keep the stronger (larger impactSize). Only used for
+ * the combined single voice — per-role voices keep their own density so
+ * simultaneous cross-instrument hits survive.
+ */
+function thinForSingleBall(targets: readonly ChoreographyTarget[]): ChoreographyTarget[] {
+  const sorted = [...targets].sort((a, b) => a.timeSec - b.timeSec);
+  const kept: ChoreographyTarget[] = [];
+  for (const target of sorted) {
+    const previous = kept[kept.length - 1];
+    if (previous !== undefined && target.timeSec - previous.timeSec < SINGLE_BALL_MIN_GAP_SEC) {
+      if (target.impactSize > previous.impactSize) kept[kept.length - 1] = target;
+      continue;
+    }
+    kept.push(target);
+  }
+  return kept;
+}
 
 function launchY(config: LayoutConfig): number {
   return Math.round(config.canvasHeight * LAUNCH_Y_RATIO);
@@ -462,7 +481,8 @@ export function planVoices(
       label: 'All hits',
       colorHint: DEFAULT_VOICE_COLOR,
       startPosition: [laneX(CENTER_LANE_FRACTION, config), y],
-      targets: [...targets],
+      // One ball must physically reach every target, so thin overlaps.
+      targets: thinForSingleBall(targets),
     },
   ];
 
@@ -496,9 +516,9 @@ export function planVoices(
     }
     voices.push({
       id: `voice_${role}`,
-      label: role.charAt(0).toUpperCase() + role.slice(1),
+      label: ROLE_LABELS[role],
       role,
-      colorHint: ROLE_VOICE_COLOR[role],
+      colorHint: ROLE_COLORS[role],
       startPosition: [laneX(ROLE_LANE_POSITION[role], config), y],
       targets: roleTargets,
     });

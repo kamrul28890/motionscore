@@ -30,7 +30,14 @@ export interface CLIOptions {
    * - `'onsets'`: full-mix attacks without stem-aware salience filtering.
    * - `'notes'`: full pitched transcription via Basic Pitch (very dense).
    */
-  mode?: 'auto' | 'notes' | 'beats' | 'onsets';
+  mode?: 'auto' | 'notes' | 'beats' | 'onsets' | 'stems';
+  /**
+   * How many balls to render (audio only; MIDI/`notes` fall back to a single
+   * ball). See {@link VoiceGrouping} and `docs/MULTI_BALL_PLAN.md`.
+   * - `'single'` (default): one ball hits every event.
+   * - `'per-role'`: one ball per instrument role (kick, bass, snare, ...).
+   */
+  balls?: 'single' | 'per-role';
   /** When true, print per-stage progress information. */
   verbose?: boolean;
   /**
