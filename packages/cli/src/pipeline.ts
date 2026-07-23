@@ -49,7 +49,11 @@ import { extractWithAnalysis } from '@motionscore/note-extractor';
 import { mapNotes, planVoices } from '@motionscore/musical-mapper';
 import { solveChoreography } from '@motionscore/trajectory-solver';
 import { render, renderAndEncodeVoices, type RenderVoice } from '@motionscore/renderer';
-import { exportVideo, type ExportProgressCallback } from '@motionscore/video-export';
+import {
+  exportVideo,
+  detectAvailableEncoders,
+  type ExportProgressCallback,
+} from '@motionscore/video-export';
 
 import { assertInputReadable, type ParsedArgs } from './args.js';
 import { assertFfmpegAvailable, exportVideoOnly } from './video-only.js';
@@ -256,6 +260,32 @@ function stageDone(verbose: boolean, name: string, startedAt: number, detail?: s
   }
   const elapsedMs = (performance.now() - startedAt).toFixed(1);
   logVerbose(verbose, `${name} done in ${elapsedMs}ms${detail === undefined ? '' : ` (${detail})`}`);
+}
+
+/** Hardware H.264 encoders, in the order we prefer them when auto-selecting. */
+const GPU_ENCODER_PREFERENCE = ['h264_nvenc', 'h264_amf', 'h264_qsv'] as const;
+
+/**
+ * Resolve which H.264 encoder to use for the render+encode stage.
+ *
+ * An explicit `--codec` always wins (the user asked for it). Otherwise we probe
+ * which encoders actually run in the installed ffmpeg — `detectAvailableEncoders`
+ * does a real one-frame test-encode per candidate, so a codec that is compiled
+ * in but non-functional (e.g. NVENC with no NVIDIA GPU) is not offered — and
+ * prefer a hardware encoder, which is dramatically faster than libx264 for this
+ * workload. Falls back to libx264, which is always present when ffmpeg is.
+ */
+async function resolveCodec(explicit: string | undefined): Promise<string> {
+  if (explicit !== undefined && explicit.length > 0) {
+    return explicit;
+  }
+  const available = new Set(await detectAvailableEncoders());
+  for (const codec of GPU_ENCODER_PREFERENCE) {
+    if (available.has(codec)) {
+      return codec;
+    }
+  }
+  return 'libx264';
 }
 
 /**
@@ -476,6 +506,17 @@ export async function runPipeline(parsed: ParsedArgs): Promise<PipelineResult> {
     await assertFfmpegAvailable();
     stageDone(verbose, 'check ffmpeg available', startedAt);
 
+    // Pick the encoder before rendering: honor an explicit --codec, else probe
+    // for a working GPU encoder (much faster than libx264 for this workload).
+    startedAt = stageStart(verbose, 'select encoder');
+    const codec = await resolveCodec(options.codec);
+    stageDone(
+      verbose,
+      'select encoder',
+      startedAt,
+      options.codec ? `${codec} (explicit)` : `${codec} (auto-selected)`,
+    );
+
     // --- Stage E + F: render and encode (streaming) -------------------------
     // Uses the high-performance streaming path: draws each frame and pipes raw
     // RGBA pixels directly to ffmpeg's stdin, skipping PNG encoding and disk I/O.
@@ -506,7 +547,7 @@ export async function runPipeline(parsed: ParsedArgs): Promise<PipelineResult> {
       {
         outputPath: options.output,
         fps,
-        codec: options.codec,
+        codec,
         gpuDevice: options.gpuDevice,
         preset: options.preset,
         quality: undefined,

@@ -197,6 +197,24 @@ Three Fiber or PixiJS/Canvas for a web stack; Pygame/Cairo/Manim for a
 Python stack) and `ffmpeg` (native or `ffmpeg.wasm`) for final video export
 and audio muxing. No reason to build either from scratch.
 
+**Implementation status (2D streaming path).** The shipped renderer
+(`packages/renderer/src/stream-render.ts`, `renderAndEncodeVoices`) draws each
+frame with `@napi-rs/canvas` and pipes raw RGBA straight to `ffmpeg` stdin
+(`rawvideo`), skipping per-frame PNG encode + disk I/O. Performance/RAM design
+notes:
+- The background + resting target keys are drawn once into an offscreen
+  "static layer" and blitted per frame (not redrawn), so cost is independent of
+  target/ball count — this was the dominant multi-ball slowdown.
+- Ball positions are interpolated lazily per frame (no precomputed
+  `positions[totalFrames]` per voice), keeping memory flat over long songs.
+- Pixels are copied from the live `canvas.data()` view into two reused,
+  alternated frame buffers (backpressure drains each large write before a
+  buffer is reused), avoiding an ~8 MiB allocation per frame.
+- Encoder selection (`pipeline.ts` `resolveCodec`): an explicit `--codec` wins;
+  otherwise `detectAvailableEncoders()` runs a real one-frame test-encode per
+  candidate and prefers a working GPU encoder (`h264_nvenc` > `h264_amf` >
+  `h264_qsv`) over `libx264` (which defaults to `-preset veryfast`).
+
 ### Stage F — Art Direction / Post-processing
 
 **Purpose:** the layer that turns "technically synced" into "looks good":
@@ -206,6 +224,25 @@ grading/palette per pitch or section, background art, motion blur.
 Keep this as a distinct, swappable layer on top of Stage E's raw simulation
 output rather than baked into the physics or renderer code, so visual style
 can change without touching simulation logic.
+
+**Implementation status (2D "juice").** Until the dedicated art-direction layer
+/ 3D renderer exists, a set of impact-reactive effects lives in the 2D renderer's
+draw helpers (`stream-render.ts`), tuned via constants at the top of the file:
+- **Squash & stretch** — the ball elongates along its velocity between hits and
+  flattens vertically for a moment on impact (velocity is the per-frame position
+  delta; the squash window is keyed to each voice's own impact times).
+- **Impact bloom + shards** — a bright radial flash and an expanding shockwave
+  ring behind the ball, plus additive debris shards that arc outward under a
+  decorative gravity.
+- **Key-press flash** — a struck key brightens briefly over its resting self.
+- **Screen shake** — strong impacts nudge the whole frame; the static layer is
+  overscanned so the shift never exposes an edge.
+- **Additive trails** — trails composite with `lighter` for a glow.
+
+These are gated where sensible by `RenderConfig.particlesOnImpact` and scale
+with `impactSize`, so they read as reactions to the music rather than constant
+motion. This is deliberately a stopgap inside Stage E's renderer; the design
+intent (a swappable Stage F, plus a camera) still stands.
 
 ### Alternate track: Line Rider-specific integration
 
