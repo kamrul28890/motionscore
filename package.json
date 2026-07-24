@@ -2,26 +2,17 @@
   "name": "motionscore",
   "version": "0.1.0",
   "private": true,
-  "description": "CLI-based music-to-physics video generator (monorepo)",
+  "description": "Neural-stem music visualizer: audio -> live 2D physics scene (web)",
   "type": "module",
   "workspaces": [
     "packages/types",
     "packages/note-extractor",
-    "packages/musical-mapper",
-    "packages/trajectory-solver",
-    "packages/renderer",
-    "packages/video-export",
-    "packages/cli",
     "packages/web"
   ],
-  "bin": {
-    "motionscore": "packages/cli/dist/bin.js"
-  },
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b",
     "clean": "tsc -b --clean",
-    "start": "node packages/cli/dist/bin.js",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
     "web:dev": "npm run dev -w @motionscore/web",

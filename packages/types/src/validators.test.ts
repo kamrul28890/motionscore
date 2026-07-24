@@ -276,7 +276,7 @@ describe('validateNoteEvents — examples and edge cases', () => {
     } catch (error) {
       expect(error).toBeInstanceOf(ValidationError);
       if (error instanceof ValidationError) {
-        expect(error.stage).toContain('Stage B');
+        expect(error.stage).toContain('NoteEvent');
         expect(error.field).toBe('events[1].pitchMidi');
         expect(error.value).toBe(200);
       }

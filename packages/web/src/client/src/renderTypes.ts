@@ -15,14 +15,14 @@ export type HitRole =
   | 'piano'
   | 'guitar';
 
-/** A single hittable musical event (audio attack or MIDI note). */
+/** A single hittable musical event (audio attack). */
 export interface NoteEvent {
   id: string;
   pitchMidi: number;
   startSec: number;
   endSec: number;
   velocity: number;
-  source?: 'midi' | 'audio';
+  source?: 'audio';
   role?: HitRole;
   confidence?: number;
   salience?: number;
@@ -68,63 +68,21 @@ export interface SectionCue {
   confidence: number;
 }
 
-/** Full rich analysis (audio inputs analyzed with a rhythmic mode). */
+/** Full rich analysis (neural per-instrument stems). */
 export interface AudioAnalysis {
   version: 1;
   durationSec: number;
   tempoBpm: number;
-  mode: 'smart' | 'beats' | 'onsets' | 'stems';
+  mode: 'stems';
   hits: NoteEvent[];
   featureFrames: AudioFeatureFrame[];
   sectionCues: SectionCue[];
   roleSignals?: RoleSignals;
 }
 
-// --- Choreography (optional for the Line Rider renderer; kept for parity) ---
-
-export interface TrajectoryKeyframe {
-  tSec: number;
-  pos: [number, number];
-  vel: [number, number];
-  hitsTarget?: string;
-}
-
-export interface ObjectTrajectory {
-  objectId: string;
-  keyframes: TrajectoryKeyframe[];
-}
-
-export interface ChoreographyTarget {
-  noteId: string;
-  timeSec: number;
-  position: { x: number; y: number };
-  impactSize: number;
-  colorHint: string;
-  role?: HitRole;
-}
-
-export interface Voice {
-  id: string;
-  label: string;
-  role?: HitRole;
-  colorHint: string;
-  startPosition: [number, number];
-  targets: ChoreographyTarget[];
-  trajectory: ObjectTrajectory;
-}
-
-export interface Choreography {
-  durationSec: number;
-  voices: Voice[];
-}
-
 /** Response body of GET /api/result/:jobId. */
 export interface ResultPayload {
   durationSec: number;
-  inputType: 'midi' | 'audio';
-  hasAudio: boolean;
-  audioUrl: string | null;
-  videoUrl: string;
-  choreography: Choreography | null;
+  audioUrl: string;
   analysis: AudioAnalysis | null;
 }

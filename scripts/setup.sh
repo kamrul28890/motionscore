@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Sets up PyTorch + Demucs for neural per-instrument analysis (--mode stems).
-# Reuses the project .venv (same one used by scripts/setup-audio.sh).
+# One-step Python environment for MotionScore's neural analyzer
+# (PyTorch + Demucs + librosa). Creates/uses the project .venv.
+#
 # Run from the project root:
-#   ./scripts/setup-demucs.sh          # CUDA build (NVIDIA GPU, CUDA 12.1 wheels)
-#   ./scripts/setup-demucs.sh --cpu    # CPU-only build (no GPU / macOS / troubleshooting)
+#   ./scripts/setup.sh          # CUDA build (NVIDIA GPU, CUDA 12.1 wheels)
+#   ./scripts/setup.sh --cpu    # CPU-only build (no GPU / macOS / troubleshooting)
 
 set -euo pipefail
 
@@ -16,7 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 VENV_DIR="$PROJECT_ROOT/.venv"
 
-echo "[setup] Preparing Demucs (neural stems) environment at $VENV_DIR ..."
+echo "[setup] Preparing the analysis environment at $VENV_DIR ..."
 
 if [ -d "$VENV_DIR" ]; then
     echo "[setup] .venv already exists, reusing it."
@@ -29,11 +30,12 @@ PYTHON_EXE="$VENV_DIR/bin/python"
 echo "[setup] Upgrading pip ..."
 "$PYTHON_EXE" -m pip install --upgrade pip
 
-# librosa powers the onset/feature/cue analysis that runs on the separated stems.
-echo "[setup] Ensuring librosa 0.11.0 is installed ..."
+# librosa powers the onset/feature/section-cue analysis that runs on the
+# separated stems.
+echo "[setup] Installing librosa 0.11.0 ..."
 "$PYTHON_EXE" -m pip install "librosa==0.11.0"
 
-# macOS has no CUDA wheels; force CPU/MPS build there regardless of the flag.
+# macOS has no CUDA wheels; force the CPU/MPS build there regardless of the flag.
 if [ "$(uname -s)" = "Darwin" ]; then
     CPU_ONLY=1
 fi
@@ -43,7 +45,7 @@ if [ "$CPU_ONLY" -eq 1 ]; then
     "$PYTHON_EXE" -m pip install "torch==2.4.1" "torchaudio==2.4.1"
 else
     echo "[setup] Installing PyTorch 2.4.1 (CUDA 12.1 build) ..."
-    echo "[setup] (~2.4 GB download. For CPU-only machines re-run with --cpu.)"
+    echo "[setup] (~2.4 GB download. On a machine without an NVIDIA GPU, re-run with --cpu.)"
     "$PYTHON_EXE" -m pip install "torch==2.4.1" "torchaudio==2.4.1" --index-url https://download.pytorch.org/whl/cu121
 fi
 
@@ -54,7 +56,7 @@ echo "[setup] Verifying the install ..."
 "$PYTHON_EXE" -c "import torch, demucs, librosa; print('torch', torch.__version__, 'cuda', torch.cuda.is_available()); print('demucs', demucs.__version__)"
 
 echo
-echo "[setup] Neural stems analysis is ready (--mode stems)."
-echo "The htdemucs_6s model (~170 MB) downloads automatically on first use."
-echo "Set PYTHON before running MotionScore:"
+echo "[setup] Done. The htdemucs_6s model (~170 MB) downloads automatically on first use."
+echo "Point MotionScore at this Python before starting the server:"
 echo "  export PYTHON=\"$PYTHON_EXE\""
+echo "(The web server also auto-detects .venv, so this is usually optional.)"

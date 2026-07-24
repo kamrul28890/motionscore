@@ -1,49 +1,29 @@
 #!/usr/bin/env python3
-"""Extract musically useful hit events and structural cues from audio.
+"""Shared DSP helpers for the neural stems analyzer.
 
-Usage:
-    python extract_events.py <audio_path> <output_json> [smart|beats|onsets]
+Imported by ``extract_stems.py`` as ``import extract_events as ee``. It exposes
+the librosa-based primitives that analyzer reuses: sample-rate/FFT constants,
+robust feature normalization, spectral band slicing, per-frame onset peak
+picking, full-mix HPSS feature analysis, the fixed-rate feature-frame sampler,
+and structural section-cue detection.
 
-Modes:
-    smart   HPSS + frequency-band onset fusion. Keeps salient drum, bass, and
-            melodic attacks while merging simultaneous/repetitive transients.
-    beats   Percussive beat tracker, retained as the sparse comparison mode.
-    onsets  Full-mix onset detector, retained as the denser comparison mode.
-
-The JSON includes discrete events for the ball, a 10 Hz continuous feature
-track for future scene animation, and section cues such as builds and drops.
-No neural model is required: this uses librosa's open-source HPSS, onset,
-beat, and spectral-feature primitives already installed in the project venv.
+The former standalone CLI analyzer (the smart/beats/onsets modes with their own
+``main()`` entry point, argument parsing, candidate/role fusion, beat tracking,
+and JSON writer) has been removed. Importing this module has no side effects: it
+only defines constants, one dataclass, and pure helper functions. numpy, librosa
+and scipy are imported lazily inside the functions that use them.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
-import sys
-import warnings
-from typing import Iterable
 
 
 SAMPLE_RATE = 22_050
 N_FFT = 2_048
 HOP_LENGTH = 512
 FEATURE_RATE_HZ = 10.0
-MERGE_WINDOW_SEC = 0.095
-MIN_HIT_GAP_SEC = 0.09
-# Full-song HPSS still requires spectrogram-sized working memory. Reject very
-# long uploads before decoding/allocating matrices; longer mixes should be
-# split into sections or handled by a future chunked analyzer.
-MAX_AUDIO_DURATION_SEC = 12 * 60
 
-ROLES = ("kick", "bass", "snare", "percussion", "melodic")
-ROLE_PRIORITY = {
-    "kick": 1.15,
-    "bass": 1.10,
-    "snare": 1.05,
-    "melodic": 1.00,
-    "percussion": 0.86,
-}
 ROLE_PITCH = {
     "kick": 60.0,
     "bass": 52.0,
@@ -51,34 +31,6 @@ ROLE_PITCH = {
     "percussion": 80.0,
     "melodic": 68.0,
 }
-ROLE_MIN_SALIENCE = {
-    "kick": 0.23,
-    "bass": 0.25,
-    "snare": 0.28,
-    "percussion": 0.38,
-    "melodic": 0.34,
-}
-ROLE_PEAK_DELTA = {
-    "kick": 0.07,
-    "bass": 0.08,
-    "snare": 0.08,
-    "percussion": 0.11,
-    "melodic": 0.10,
-}
-
-
-@dataclass
-class Candidate:
-    frame: int
-    time_sec: float
-    role: str
-    strength: float
-    salience: float
-    confidence: float
-
-    @property
-    def rank(self) -> float:
-        return self.salience * ROLE_PRIORITY[self.role]
 
 
 @dataclass
@@ -183,239 +135,6 @@ def _detect_peak_frames(envelope, sr: int, delta: float):
         delta=delta,
         wait=2,
     ).astype(int)
-
-
-def _beat_bonus(time_sec: float, beat_times) -> float:
-    import numpy as np
-
-    if beat_times.size == 0:
-        return 0.0
-    index = int(np.searchsorted(beat_times, time_sec))
-    distances = []
-    if index < beat_times.size:
-        distances.append(abs(float(beat_times[index]) - time_sec))
-    if index > 0:
-        distances.append(abs(float(beat_times[index - 1]) - time_sec))
-    nearest = min(distances, default=1.0)
-    return _clip01(1.0 - nearest / 0.08)
-
-
-def _dominant_role(role_envelopes: dict[str, "object"], frame: int) -> tuple[str, float]:
-    role = max(
-        ROLES,
-        key=lambda name: float(role_envelopes[name][frame]) * ROLE_PRIORITY[name],
-    )
-    return role, float(role_envelopes[role][frame])
-
-
-def _build_candidates(
-    mode: str,
-    arrays: AnalysisArrays,
-    beat_frames,
-    beat_times,
-    sr: int,
-) -> list[Candidate]:
-    import numpy as np
-    import librosa
-
-    candidates: list[Candidate] = []
-
-    if mode == "beats":
-        source_frames: Iterable[int] = beat_frames
-        for raw_frame in source_frames:
-            frame = min(max(int(raw_frame), 0), arrays.full_onset.size - 1)
-            role, role_strength = _dominant_role(arrays.role_envelopes, frame)
-            global_strength = float(arrays.full_onset[frame])
-            salience = _clip01(0.60 * global_strength + 0.40 * role_strength)
-            candidates.append(
-                Candidate(
-                    frame=frame,
-                    time_sec=float(librosa.frames_to_time(frame, sr=sr, hop_length=HOP_LENGTH)),
-                    role=role,
-                    strength=max(global_strength, role_strength),
-                    salience=max(0.30, salience),
-                    confidence=_clip01(0.35 + 0.65 * salience),
-                )
-            )
-        return candidates
-
-    if mode == "onsets":
-        onset_frames = _detect_peak_frames(arrays.full_onset, sr, delta=0.08)
-        for raw_frame in onset_frames:
-            frame = min(max(int(raw_frame), 0), arrays.full_onset.size - 1)
-            role, role_strength = _dominant_role(arrays.role_envelopes, frame)
-            global_strength = float(arrays.full_onset[frame])
-            salience = _clip01(0.72 * global_strength + 0.28 * role_strength)
-            if salience < 0.18:
-                continue
-            candidates.append(
-                Candidate(
-                    frame=frame,
-                    time_sec=float(librosa.frames_to_time(frame, sr=sr, hop_length=HOP_LENGTH)),
-                    role=role,
-                    strength=max(global_strength, role_strength),
-                    salience=salience,
-                    confidence=_clip01(0.25 + 0.75 * salience),
-                )
-            )
-        return candidates
-
-    # Smart mode detects each pseudo-stem independently. The merge pass below
-    # combines simultaneous kick/bass/snare/etc. attacks into one hittable event.
-    for role in ROLES:
-        envelope = arrays.role_envelopes[role]
-        peak_frames = _detect_peak_frames(envelope, sr, ROLE_PEAK_DELTA[role])
-        for raw_frame in peak_frames:
-            frame = min(max(int(raw_frame), 0), arrays.full_onset.size - 1)
-            role_strength = float(envelope[frame])
-            global_strength = float(arrays.full_onset[frame])
-            bonus = _beat_bonus(
-                float(librosa.frames_to_time(frame, sr=sr, hop_length=HOP_LENGTH)),
-                beat_times,
-            )
-            # Harmonic low-band envelopes can ring around a sustained bass tone.
-            # Require either visible full-mix evidence or an exceptionally clear
-            # independent stem attack; this preserves syncopated bass while
-            # removing artificial in-between hits.
-            if (
-                role in ("bass", "melodic")
-                and global_strength < 0.04
-                and role_strength < 0.95
-            ):
-                continue
-            salience = _clip01(
-                0.62 * role_strength + 0.28 * global_strength + 0.10 * bonus
-            )
-            if salience < ROLE_MIN_SALIENCE[role]:
-                continue
-            candidates.append(
-                Candidate(
-                    frame=frame,
-                    time_sec=float(librosa.frames_to_time(frame, sr=sr, hop_length=HOP_LENGTH)),
-                    role=role,
-                    strength=max(role_strength, global_strength),
-                    salience=salience,
-                    confidence=_clip01(
-                        0.20 + 0.62 * salience + 0.18 * min(1.0, role_strength)
-                    ),
-                )
-            )
-    return candidates
-
-
-def _merge_candidates(candidates: list[Candidate]) -> list[Candidate]:
-    """Merge simultaneous pseudo-stem spikes and suppress low-value repetition."""
-    if not candidates:
-        return []
-
-    ordered = sorted(candidates, key=lambda item: (item.time_sec, -item.rank))
-    clusters: list[list[Candidate]] = []
-    cluster: list[Candidate] = []
-    cluster_start = 0.0
-    for candidate in ordered:
-        if not cluster or candidate.time_sec - cluster_start <= MERGE_WINDOW_SEC:
-            if not cluster:
-                cluster_start = candidate.time_sec
-            cluster.append(candidate)
-        else:
-            clusters.append(cluster)
-            cluster = [candidate]
-            cluster_start = candidate.time_sec
-    if cluster:
-        clusters.append(cluster)
-
-    merged: list[Candidate] = []
-    for group in clusters:
-        dominant = max(group, key=lambda item: item.rank)
-        role_count = len({item.role for item in group})
-        merged.append(
-            Candidate(
-                frame=dominant.frame,
-                time_sec=dominant.time_sec,
-                role=dominant.role,
-                strength=max(item.strength for item in group),
-                salience=_clip01(
-                    max(item.salience for item in group) + 0.05 * (role_count - 1)
-                ),
-                confidence=_clip01(
-                    max(item.confidence for item in group) + 0.04 * (role_count - 1)
-                ),
-            )
-        )
-
-    # A single ball cannot communicate two different hits within ~90 ms. Keep
-    # the more salient event rather than always keeping the earlier one.
-    spaced: list[Candidate] = []
-    for candidate in merged:
-        if spaced and candidate.time_sec - spaced[-1].time_sec < MIN_HIT_GAP_SEC:
-            if candidate.rank > spaced[-1].rank:
-                spaced[-1] = candidate
-            continue
-
-        # Constant high-frequency sixteenth notes otherwise dominate many
-        # mixes. Keep close repetitions only when the new transient is strong.
-        if (
-            spaced
-            and candidate.role == "percussion"
-            and spaced[-1].role == "percussion"
-            and candidate.time_sec - spaced[-1].time_sec < 0.16
-            and candidate.salience < 0.76
-        ):
-            if candidate.rank > spaced[-1].rank:
-                spaced[-1] = candidate
-            continue
-        spaced.append(candidate)
-
-    # No fixed per-second cap: density is already bounded by the perceptual merge
-    # window and MIN_HIT_GAP_SEC (a single ball physically cannot re-strike
-    # faster). Letting the rest through avoids arbitrarily deleting audible hits
-    # during genuinely busy passages.
-    return sorted(spaced, key=lambda item: item.time_sec)
-
-
-def _candidate_pitch(candidate: Candidate, centroid_hz, previous_pitch: float, previous_time: float) -> float:
-    import numpy as np
-
-    raw_pitch = ROLE_PITCH[candidate.role]
-    if candidate.role == "melodic":
-        hz = float(centroid_hz[candidate.frame])
-        if hz > 0.0 and np.isfinite(hz):
-            spectral_pitch = 69.0 + 12.0 * np.log2(hz / 440.0)
-            raw_pitch = 0.65 * raw_pitch + 0.35 * max(56.0, min(82.0, spectral_pitch))
-
-    # Slew-limit the position hint. Short event gaps permit only small lane
-    # changes; longer phrases can travel farther. This is a hint encoded in the
-    # existing pitch field, not an attempt to transcribe the actual pitch.
-    delta_sec = max(0.0, candidate.time_sec - previous_time)
-    max_delta = 4.0 + 18.0 * min(delta_sec, 0.75)
-    return previous_pitch + max(-max_delta, min(max_delta, raw_pitch - previous_pitch))
-
-
-def _events_from_candidates(candidates: list[Candidate], arrays: AnalysisArrays):
-    events = []
-    previous_pitch = 64.0
-    previous_time = 0.0
-    for candidate in candidates:
-        pitch = _candidate_pitch(
-            candidate,
-            arrays.centroid_hz,
-            previous_pitch,
-            previous_time,
-        )
-        previous_pitch = pitch
-        previous_time = candidate.time_sec
-        velocity = _clip01(0.25 + 0.75 * candidate.salience)
-        events.append(
-            {
-                "timeSec": round(candidate.time_sec, 6),
-                "pitchMidi": int(max(21, min(108, round(pitch)))),
-                "velocity": round(velocity, 4),
-                "role": candidate.role,
-                "confidence": round(candidate.confidence, 4),
-                "salience": round(candidate.salience, 4),
-            }
-        )
-    return events
 
 
 def _feature_frames(arrays: AnalysisArrays, duration: float):
@@ -774,93 +493,3 @@ def _analyze_arrays(y, sr: int) -> AnalysisArrays:
             max(1, smoothing_frames // 2),
         ),
     )
-
-
-def main() -> int:
-    if len(sys.argv) < 3:
-        print(
-            "usage: extract_events.py <audio_path> <output_json> [smart|beats|onsets]",
-            file=sys.stderr,
-        )
-        return 2
-
-    audio_path = sys.argv[1]
-    output_path = sys.argv[2]
-    mode = sys.argv[3] if len(sys.argv) > 3 else "smart"
-    if mode not in ("smart", "beats", "onsets"):
-        print(
-            f"unknown mode '{mode}', expected 'smart', 'beats', or 'onsets'",
-            file=sys.stderr,
-        )
-        return 2
-
-    warnings.filterwarnings("ignore")
-
-    import numpy as np
-    import librosa
-
-    reported_duration = float(librosa.get_duration(path=audio_path))
-    if reported_duration > MAX_AUDIO_DURATION_SEC:
-        print(
-            f"audio duration {reported_duration:.1f}s exceeds the "
-            f"{MAX_AUDIO_DURATION_SEC / 60:.0f}-minute analysis limit; split the input first",
-            file=sys.stderr,
-        )
-        return 2
-
-    y, sr = librosa.load(audio_path, sr=SAMPLE_RATE, mono=True)
-    duration = float(librosa.get_duration(y=y, sr=sr))
-    if duration > MAX_AUDIO_DURATION_SEC:
-        print(
-            f"decoded audio duration {duration:.1f}s exceeds the "
-            f"{MAX_AUDIO_DURATION_SEC / 60:.0f}-minute analysis limit",
-            file=sys.stderr,
-        )
-        return 2
-    arrays = _analyze_arrays(y, sr)
-
-    tempo_array, beat_frames = librosa.beat.beat_track(
-        onset_envelope=arrays.percussive_onset,
-        sr=sr,
-        hop_length=HOP_LENGTH,
-    )
-    tempo = float(np.atleast_1d(tempo_array)[0]) if np.size(tempo_array) else 0.0
-    beat_frames = np.asarray(beat_frames, dtype=int)
-    beat_times = librosa.frames_to_time(beat_frames, sr=sr, hop_length=HOP_LENGTH)
-
-    candidates = _build_candidates(mode, arrays, beat_frames, beat_times, sr)
-    selected = _merge_candidates(candidates) if mode == "smart" else sorted(
-        candidates, key=lambda item: item.time_sec
-    )
-    events = _events_from_candidates(selected, arrays)
-    frames = _feature_frames(arrays, duration)
-    section_cues = _detect_section_cues(frames, duration)
-
-    result = {
-        "version": 1,
-        "durationSec": round(duration, 6),
-        "tempo": round(tempo, 2),
-        "mode": mode,
-        "events": events,
-        "featureFrames": frames,
-        "sectionCues": section_cues,
-    }
-    with open(output_path, "w", encoding="utf-8") as output_file:
-        json.dump(result, output_file, allow_nan=False, separators=(",", ":"))
-
-    role_counts = {role: 0 for role in ROLES}
-    for event in events:
-        role_counts[event["role"]] += 1
-    populated_roles = ",".join(
-        f"{role}:{count}" for role, count in role_counts.items() if count > 0
-    ) or "none"
-    print(
-        f"extract_events: mode={mode} events={len(events)} roles={populated_roles} "
-        f"cues={len(section_cues)} tempo={tempo:.1f}bpm duration={duration:.1f}s",
-        file=sys.stderr,
-    )
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

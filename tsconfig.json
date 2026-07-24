@@ -6,11 +6,6 @@
   "files": [],
   "references": [
     { "path": "./packages/types" },
-    { "path": "./packages/note-extractor" },
-    { "path": "./packages/musical-mapper" },
-    { "path": "./packages/trajectory-solver" },
-    { "path": "./packages/renderer" },
-    { "path": "./packages/video-export" },
-    { "path": "./packages/cli" }
+    { "path": "./packages/note-extractor" }
   ]
 }

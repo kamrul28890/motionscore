@@ -2,7 +2,7 @@
   "name": "@motionscore/note-extractor",
   "version": "0.1.0",
   "private": true,
-  "description": "Stage B: extracts normalized NoteEvents from MIDI or audio input",
+  "description": "Neural per-instrument audio analysis (Demucs stems) -> AudioAnalysis",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -16,8 +16,7 @@
     "build": "tsc -b"
   },
   "dependencies": {
-    "@motionscore/types": "0.1.0",
-    "@tonejs/midi": "2.0.28"
+    "@motionscore/types": "0.1.0"
   },
   "devDependencies": {
     "@types/node": "26.1.1"

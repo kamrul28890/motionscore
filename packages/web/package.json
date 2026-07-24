@@ -12,7 +12,7 @@
     "start": "node dist/server.js"
   },
   "dependencies": {
-    "@motionscore/cli": "0.1.0",
+    "@motionscore/note-extractor": "0.1.0",
     "@motionscore/types": "0.1.0",
     "cors": "2.8.5",
     "express": "4.21.2",

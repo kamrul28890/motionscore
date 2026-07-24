@@ -1,9 +1,9 @@
 // @motionscore/note-extractor — stem-aware rhythmic audio analysis
 //
-// The Python helper uses librosa HPSS and independent low/mid/high-frequency
-// onset envelopes to select salient attacks from a full mix. This wrapper keeps
-// the established NoteEvent[] API while also exposing the continuous feature
-// timeline and structural cues needed by future renderers.
+// Runs the Python neural analyzer (Demucs `htdemucs_6s`) as a subprocess,
+// validates its JSON output, and converts it into the typed AudioAnalysis:
+// per-stem onsets (NoteEvent[]), 10 Hz feature frames, structural section cues,
+// and compact per-role neural signals.
 
 import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
@@ -26,15 +26,9 @@ import {
   type SustainSpan,
 } from '@motionscore/types';
 
-/** Strategies implemented by the librosa helper. */
-export type AudioEventExtractionMode = AudioAnalysisMode;
-/** Backward-compatible name retained for existing imports. */
-export type BeatExtractionMode = AudioEventExtractionMode;
-
 const PYTHON_ENV_VAR = 'PYTHON';
 const DEFAULT_PYTHON = 'python';
-const SCRIPT_PATH = fileURLToPath(new URL('../python/extract_events.py', import.meta.url));
-/** Neural per-instrument analyzer (Demucs stems); used only for `stems` mode. */
+/** Neural per-instrument analyzer (Demucs `htdemucs_6s`). */
 const STEMS_SCRIPT_PATH = fileURLToPath(new URL('../python/extract_stems.py', import.meta.url));
 const EVENT_DURATION_SEC = 0.12;
 const NOTE_ID_DIGITS = 4;
@@ -125,15 +119,15 @@ const SECTION_CUE_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 const SETUP_HINT =
-  'Audio analysis needs Python 3 with librosa. Run the lightweight setup script ' +
-  '(scripts/setup-audio.ps1 on Windows, scripts/setup-audio.sh on macOS/Linux), ' +
-  'then set the PYTHON environment variable to the venv Python (for example ' +
+  'Analysis needs the project Python env. Run the setup script ' +
+  '(scripts/setup.ps1 on Windows, scripts/setup.sh on macOS/Linux), then set the ' +
+  'PYTHON environment variable to the venv Python (for example ' +
   '.venv/Scripts/python.exe or .venv/bin/python).';
 
 const STEMS_SETUP_HINT =
-  'Neural per-instrument analysis (mode "stems") needs PyTorch + Demucs (plus ' +
-  'librosa) in the Python env. Run scripts/setup-demucs.ps1 (Windows) or ' +
-  'scripts/setup-demucs.sh (macOS/Linux), then point PYTHON at that venv.';
+  'Neural per-instrument analysis needs PyTorch + Demucs (plus librosa) in the ' +
+  'Python env. Run scripts/setup.ps1 (Windows) or scripts/setup.sh (macOS/Linux), ' +
+  'then point PYTHON at that venv.';
 
 interface RawEvent {
   timeSec: number;
@@ -180,16 +174,15 @@ interface RawExtractionResult {
  */
 export async function analyzeAudioEvents(
   audioPath: string,
-  mode: AudioEventExtractionMode = 'smart',
 ): Promise<AudioAnalysis> {
   const python = process.env[PYTHON_ENV_VAR] ?? DEFAULT_PYTHON;
   const workDir = await mkdtemp(join(tmpdir(), 'motionscore-analysis-'));
   const outJson = join(workDir, 'analysis.json');
 
   try {
-    await runExtractor(python, audioPath, outJson, mode);
+    await runExtractor(python, audioPath, outJson);
     const rawJson = await readFile(outJson, 'utf8');
-    const result = parseExtractionResult(JSON.parse(rawJson) as unknown, audioPath, mode);
+    const result = parseExtractionResult(JSON.parse(rawJson) as unknown, audioPath);
     const analysis: AudioAnalysis = {
       version: 1,
       durationSec: result.durationSec,
@@ -217,22 +210,13 @@ export async function analyzeAudioEvents(
  * Backward-compatible Stage B helper returning only the selected NoteEvent[].
  * Use {@link analyzeAudioEvents} when feature frames or section cues are needed.
  */
-export async function extractAudioEvents(
-  audioPath: string,
-  mode: AudioEventExtractionMode,
-): Promise<NoteEvent[]> {
-  return (await analyzeAudioEvents(audioPath, mode)).hits;
+export async function extractAudioEvents(audioPath: string): Promise<NoteEvent[]> {
+  return (await analyzeAudioEvents(audioPath)).hits;
 }
 
-function runExtractor(
-  python: string,
-  audioPath: string,
-  outJson: string,
-  mode: AudioEventExtractionMode,
-): Promise<void> {
+function runExtractor(python: string, audioPath: string, outJson: string): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    const script = mode === 'stems' ? STEMS_SCRIPT_PATH : SCRIPT_PATH;
-    const child = spawn(python, [script, audioPath, outJson, mode], {
+    const child = spawn(python, [STEMS_SCRIPT_PATH, audioPath, outJson, 'stems'], {
       shell: false,
       env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
     });
@@ -255,7 +239,7 @@ function runExtractor(
       child.kill();
       rejectOnce(
         new TranscriptionError(
-          `Audio ${mode} analysis timed out after ${ANALYZER_TIMEOUT_MS / 60_000} minutes for "${audioPath}".`,
+          `Audio analysis timed out after ${ANALYZER_TIMEOUT_MS / 60_000} minutes for "${audioPath}".`,
         ),
       );
     }, ANALYZER_TIMEOUT_MS);
@@ -306,14 +290,13 @@ function runExtractor(
         return;
       }
       const detail = stderr.trim();
-      const hint = mode === 'stems' ? STEMS_SETUP_HINT : SETUP_HINT;
       const dependencyHint = /ModuleNotFoundError|No module named|ImportError/i.test(detail)
-        ? ` ${hint}`
+        ? ` ${STEMS_SETUP_HINT}`
         : '';
       reject(
         new TranscriptionError(
-          `Audio ${mode} analysis exited with code ${code ?? 'null'} for "${audioPath}".${dependencyHint}` +
-            (detail.length > 0 ? `\n--- librosa output ---\n${detail}` : ''),
+          `Audio analysis exited with code ${code ?? 'null'} for "${audioPath}".${dependencyHint}` +
+            (detail.length > 0 ? `\n--- analyzer output ---\n${detail}` : ''),
           detail.length > 0 ? { stderr: detail } : undefined,
         ),
       );
@@ -324,7 +307,6 @@ function runExtractor(
 function parseExtractionResult(
   value: unknown,
   audioPath: string,
-  expectedMode: AudioEventExtractionMode,
 ): RawExtractionResult {
   const root = requireRecord(value, audioPath, 'root');
   if (root['version'] !== 1) invalidOutput(audioPath, 'version', root['version']);
@@ -334,11 +316,6 @@ function parseExtractionResult(
   const rawMode = root['mode'];
   if (typeof rawMode !== 'string' || !isAnalysisMode(rawMode)) {
     invalidOutput(audioPath, 'mode', rawMode);
-  }
-  if (rawMode !== expectedMode) {
-    throw new TranscriptionError(
-      `Audio analyzer mode mismatch for "${audioPath}": requested ${expectedMode}, received ${rawMode}.`,
-    );
   }
 
   const rawEvents = requireArray(root, 'events', audioPath);
@@ -703,7 +680,7 @@ function buildSectionCues(rawCues: readonly RawSectionCue[]): SectionCue[] {
 }
 
 function isAnalysisMode(value: string): value is AudioAnalysisMode {
-  return value === 'smart' || value === 'beats' || value === 'onsets' || value === 'stems';
+  return value === 'stems';
 }
 
 function nonNegative(value: number): number {

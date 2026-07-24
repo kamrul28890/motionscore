@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef } from 'react';
-import type { PipelineStats } from '../App.js';
 import type { ResultPayload } from '../renderTypes.js';
 import { RideControls } from './RideControls.js';
 import {
@@ -11,14 +10,10 @@ import {
 } from '../scene2d/index.js';
 
 interface LiveSceneProps {
-  /** Full choreography + analysis payload from /api/result (may arrive slightly after mount). */
+  /** Full analysis payload from /api/result (may arrive slightly after mount). */
   result: ResultPayload | null;
   /** URL of the original audio; this <audio> element is the master clock. */
   audioUrl: string;
-  /** Baked MP4 URL (download fallback). */
-  videoUrl: string | null;
-  jobId: string;
-  stats: PipelineStats | null;
   settings: Scene2DSettings;
   onSettingsChange: (next: Scene2DSettings) => void;
   onReset: () => void;
@@ -33,9 +28,6 @@ interface LiveSceneProps {
 export function LiveScene({
   result,
   audioUrl,
-  videoUrl,
-  jobId,
-  stats,
   settings,
   onSettingsChange,
   onReset,
@@ -128,31 +120,22 @@ export function LiveScene({
 
       <RideControls settings={settings} onChange={onSettingsChange} />
 
-      {stats && (
+      {analysis && (
         <div className="stats-grid">
           <div className="stat">
-            <span className="stat-value">{stats.totalNotes}</span>
-            <span className="stat-label">Notes</span>
+            <span className="stat-value">{analysis.hits.length}</span>
+            <span className="stat-label">Hits</span>
           </div>
           <div className="stat">
-            <span className="stat-value">{stats.durationSec.toFixed(1)}s</span>
+            <span className="stat-value">{analysis.durationSec.toFixed(1)}s</span>
             <span className="stat-label">Duration</span>
-          </div>
-          <div className="stat">
-            <span className="stat-value">{stats.maxSyncErrorMs.toFixed(2)}ms</span>
-            <span className="stat-label">Max Sync</span>
           </div>
         </div>
       )}
 
       <div className="video-actions">
-        {videoUrl && (
-          <a href={`/api/video/${jobId}/download`} className="btn btn-primary" download>
-            Download MP4
-          </a>
-        )}
         <button className="btn btn-secondary" onClick={onReset} type="button">
-          New Video
+          Analyze another
         </button>
       </div>
     </div>
