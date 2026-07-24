@@ -1,4 +1,4 @@
-# MotionScore
+# LineVisualizer
 
 Turn a song into a live, physics-driven visualization in the browser. Upload an
 audio file and MotionScore separates it into real instruments with a neural
