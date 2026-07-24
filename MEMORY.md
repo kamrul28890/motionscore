@@ -93,7 +93,9 @@ there is no separate CLI/pipeline package.
 - `src/components/` — `FileUpload` (audio only), `ConfigForm` (just the Generate
   button), `ProgressDisplay`, `AnalysisPanel` (role/energy/cue viz),
   `LiveScene` (canvas + `<audio>` clock + rAF loop), `RideControls`
-  (drag-and-drop ball grouping, per-ball height/tilt/show-hide).
+  (drag-and-drop ball grouping, per-ball height/tilt/show-hide, one-click
+  "Merge" for suggested pairs from `model.mergeSuggestions`, and "Reset
+  positions" to clear manual overrides back to the auto layout).
 - `src/renderTypes.ts` — client-side mirror of the wire types (`AudioAnalysis`
   and its parts; `ResultPayload = { durationSec, audioUrl, analysis }`). Kept in
   sync with `@motionscore/types` by hand (the client is a standalone Vite bundle).
@@ -116,6 +118,19 @@ there is no separate CLI/pipeline package.
   back in on the next onset — landing in a `catch` cradle. Pure/closed-form
   sampling: `sampleActor`, `sampleActorVelocity`, `sampleRaceSegment`,
   `sampleRaceVelocity`.
+  - **Auto vertical layout** (`computeLaneCenters`): balls are ordered by
+    register (highest median pitch on top, since +y is down) and the gap
+    between neighbours is proportional to how far each kind swings
+    (`laneHalfHeight`: rhythm < bass < lead), scaled to ~the old uniform
+    footprint and zero-meaned. This de-crowds the scene without changing the
+    camera zoom. It is the static default layout; manual Height/Tilt overrides
+    stack on top of it.
+  - **Merge suggestions** (`computeMergeSuggestions` -> `Scene2DModel.mergeSuggestions`):
+    pairs of balls whose onsets nearly always coincide (within
+    `min(0.08s, 0.2 beat)`) are surfaced so the user can merge them into one
+    ball. Score = fraction of the sparser ball's onsets with a partner; only
+    well-populated (>=12 onsets), confident (>=0.6) pairs, top 3, denser ball
+    is the primary identity.
 - `render.ts` — `renderScene2D(ctx, model, frame)`: draws paper background,
   black physical rails/catch bowls/contact lines, then solid balls; a
   trimmed-percentile fit camera that follows the active pack. Deterministic in

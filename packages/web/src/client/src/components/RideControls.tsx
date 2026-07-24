@@ -8,11 +8,13 @@ import {
 } from '../scene2d/index.js';
 import { ROLE_COLORS, ROLE_LABELS } from '../roleMeta.js';
 import type { HitRole } from '../App.js';
-import type { ActorKind } from '../scene2d/index.js';
+import type { ActorKind, MergeSuggestion } from '../scene2d/index.js';
 
 interface RideControlsProps {
   settings: Scene2DSettings;
   onChange: (next: Scene2DSettings) => void;
+  /** Ball pairs that play together often enough to suggest merging. */
+  suggestions?: MergeSuggestion[];
 }
 
 const LEAD_ROLES: ReadonlySet<HitRole> = new Set(['melodic', 'piano', 'guitar', 'vocal']);
@@ -46,7 +48,7 @@ function getOverride(settings: Scene2DSettings, id: string): ActorOverride {
  * the "New ball" zone to split it out. Each ball also has show/hide and manual
  * vertical-offset / rotation.
  */
-export function RideControls({ settings, onChange }: RideControlsProps) {
+export function RideControls({ settings, onChange, suggestions = [] }: RideControlsProps) {
   const [dragRole, setDragRole] = useState<HitRole | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const groups = effectiveGroups(settings);
@@ -97,8 +99,27 @@ export function RideControls({ settings, onChange }: RideControlsProps) {
     updateGroups(stripped);
   };
 
+  // Merge ball B into ball A (move all of B's sounds into A, drop B).
+  const mergeGroups = (aId: string, bId: string): void => {
+    const b = groups.find((g) => g.id === bId);
+    if (!b) return;
+    updateGroups(
+      groups
+        .map((g) => (g.id === aId ? { ...g, roles: [...g.roles, ...b.roles] } : g))
+        .filter((g) => g.id !== bId),
+    );
+  };
+
+  // Return every ball to the automatic vertical layout (clear manual Height/Tilt).
+  const clearOverrides = (): void => onChange({ ...settings, actorOverrides: undefined });
+  const hasOverrides = Object.keys(settings.actorOverrides ?? {}).length > 0;
+
   const resetToDefault = (): void =>
     onChange({ ...settings, actorGroups: undefined, actorOverrides: undefined });
+
+  // Only suggest merges whose balls both still exist as separate groups.
+  const groupIds = new Set(groups.map((g) => g.id));
+  const activeSuggestions = suggestions.filter((s) => groupIds.has(s.aId) && groupIds.has(s.bId));
 
   const handleDrop = (targetId: string | 'new'): void => {
     if (!dragRole) return;
@@ -113,9 +134,32 @@ export function RideControls({ settings, onChange }: RideControlsProps) {
       <summary>Scene controls</summary>
       <div className="ride-controls-body">
         <p className="rc-hint">
-          One ball per sound. Drag a sound into another ball to group them, or onto
+          One ball per sound, auto-arranged top-to-bottom by register (high sounds
+          ride higher). Drag a sound into another ball to group them, or onto
           &ldquo;New ball&rdquo; to split it out. Toggle a ball to show/hide it.
         </p>
+
+        {activeSuggestions.length > 0 && (
+          <div className="rc-suggestions">
+            <span className="rc-suggest-title">Often play together</span>
+            {activeSuggestions.map((s) => (
+              <div key={`${s.aId}:${s.bId}`} className="rc-suggestion">
+                <span className="rc-suggest-text">
+                  {s.aLabel} + {s.bLabel}
+                  <span className="rc-suggest-score"> {Math.round(s.score * 100)}%</span>
+                </span>
+                <button
+                  type="button"
+                  className="rc-chip rc-merge"
+                  onClick={() => mergeGroups(s.aId, s.bId)}
+                  title={`Merge ${s.bLabel} into ${s.aLabel}`}
+                >
+                  Merge
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
 
         <div className="rc-balls">
           {groups.map((group) => {
@@ -218,9 +262,21 @@ export function RideControls({ settings, onChange }: RideControlsProps) {
           </div>
         </div>
 
-        <button type="button" className="rc-chip rc-reset" onClick={resetToDefault}>
-          Reset to one ball per sound
-        </button>
+        <div className="rc-reset-row">
+          <button type="button" className="rc-chip rc-reset" onClick={resetToDefault}>
+            Reset to one ball per sound
+          </button>
+          {hasOverrides && (
+            <button
+              type="button"
+              className="rc-chip rc-reset"
+              onClick={clearOverrides}
+              title="Return every ball to the automatic vertical layout"
+            >
+              Reset positions
+            </button>
+          )}
+        </div>
       </div>
     </details>
   );

@@ -118,7 +118,11 @@ export function LiveScene({
 
       <audio ref={audioRef} src={audioUrl} controls className="live-audio" />
 
-      <RideControls settings={settings} onChange={onSettingsChange} />
+      <RideControls
+        settings={settings}
+        onChange={onSettingsChange}
+        suggestions={model.mergeSuggestions}
+      />
 
       {analysis && (
         <div className="stats-grid">

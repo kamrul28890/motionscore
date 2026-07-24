@@ -19,6 +19,7 @@ import type {
   Actor,
   ActorKind,
   BallisticSegment,
+  MergeSuggestion,
   RaceContact,
   RaceSegment,
   Scene2DModel,
@@ -501,6 +502,98 @@ function longSilenceGaps(
   return gaps;
 }
 
+/** Nominal half-height (world units) each actor kind sweeps around its lane. */
+function laneHalfHeight(kind: ActorKind): number {
+  if (kind === 'rhythm') return 1.4; // bounded hops
+  if (kind === 'bass') return 2.4; // heavier catches + some sustain
+  return 3.4; // lead: swell + arcs reach furthest
+}
+
+/**
+ * Auto-position the actors vertically so the scene reads less crowded: order
+ * balls by register (a high instrument sits above a low one) and allocate the
+ * gap between neighbours in proportion to how far each actually swings, all
+ * within roughly the current footprint. Returns a lane centre per actor index.
+ */
+export function computeLaneCenters(
+  entries: ReadonlyArray<{ kind: ActorKind; contacts: readonly RaceContact[] }>,
+): number[] {
+  const n = entries.length;
+  const centers = new Array<number>(n).fill(0);
+  if (n <= 1) return centers;
+
+  const half = entries.map((e) => laneHalfHeight(e.kind));
+  const register = entries.map((e) => medianPitch(e.contacts));
+  // High register first → most negative y (top of screen, since +y is down).
+  const order = [...entries.keys()].sort((a, b) => register[b]! - register[a]! || a - b);
+
+  const margin = BALL_R * 2;
+  const gaps: number[] = [];
+  for (let i = 0; i + 1 < n; i += 1) {
+    gaps.push(half[order[i]!]! + half[order[i + 1]!]! + margin);
+  }
+  const sum = gaps.reduce((s, g) => s + g, 0) || 1;
+  // Keep the total spread close to the old uniform layout (slightly roomier),
+  // so the camera zoom is unaffected while spacing is redistributed by amplitude.
+  const target = (n - 1) * GROUP_GAP * 1.15;
+  const scale = target / sum;
+
+  const byOrder = [0];
+  for (let i = 0; i < gaps.length; i += 1) byOrder.push(byOrder[i]! + gaps[i]! * scale);
+  const mean = byOrder.reduce((s, c) => s + c, 0) / n;
+  order.forEach((actorIndex, k) => {
+    centers[actorIndex] = byOrder[k]! - mean;
+  });
+  return centers;
+}
+
+/**
+ * Suggest merging two balls when their onsets nearly always coincide (within a
+ * small window): they would draw on top of each other, so one ball is clearer.
+ * Score = fraction of the sparser ball's onsets that have a partner in the
+ * other. Only confident, well-populated pairs are returned, strongest first.
+ */
+export function computeMergeSuggestions(actors: readonly Actor[], beatSec: number): MergeSuggestion[] {
+  const window = Math.min(0.08, beatSec * 0.2);
+  const minContacts = 12;
+  const minScore = 0.6;
+  const suggestions: MergeSuggestion[] = [];
+
+  for (let i = 0; i < actors.length; i += 1) {
+    for (let j = i + 1; j < actors.length; j += 1) {
+      const a = actors[i]!;
+      const b = actors[j]!;
+      const ta = a.hitTimes;
+      const tb = b.hitTimes;
+      if (ta.length < minContacts || tb.length < minContacts) continue;
+
+      // Count onsets of the SPARSER ball that have a partner within `window`.
+      const [few, many] = ta.length <= tb.length ? [ta, tb] : [tb, ta];
+      let matches = 0;
+      let p = 0;
+      for (let k = 0; k < few.length; k += 1) {
+        const t = few[k]!;
+        while (p < many.length - 1 && many[p]! < t - window) p += 1;
+        if (Math.abs(many[p]! - t) <= window) matches += 1;
+      }
+      const score = matches / few.length;
+      if (score < minScore) continue;
+      // Merge the sparser ball into the denser one (denser = primary identity).
+      const [primary, secondary] = a.contacts.length >= b.contacts.length ? [a, b] : [b, a];
+      suggestions.push({
+        aId: primary.id,
+        bId: secondary.id,
+        aLabel: primary.label,
+        bLabel: secondary.label,
+        score: Math.round(score * 100) / 100,
+      });
+    }
+  }
+
+  suggestions.sort((x, y) => y.score - x.score);
+  return suggestions.slice(0, 3);
+}
+
 function createAnchors(
   contacts: readonly RaceContact[],
   supportSpans: readonly SupportSpan[],
@@ -571,8 +664,7 @@ function createAnchors(
 
 function planPreliminaryAnchors(
   anchors: Anchor[],
-  actorIndex: number,
-  actorCount: number,
+  laneCenter: number,
   xBias: number,
   kind: ActorKind,
   contacts: readonly RaceContact[],
@@ -582,7 +674,7 @@ function planPreliminaryAnchors(
   beatSec: number,
   rapidThreshold: number,
 ): void {
-  const baseBand = (actorIndex - (actorCount - 1) / 2) * GROUP_GAP;
+  const baseBand = laneCenter;
   const pitchCenter = medianPitch(contacts);
   let depth = 0;
   let rapidRun = 0;
@@ -1197,6 +1289,7 @@ export function buildScene2D(
     bounds: { minY: -2, maxY: 2 },
     sourceHitCount: 0,
     representedHitCount: 0,
+    mergeSuggestions: [],
   };
   if (!analysis) return empty;
 
@@ -1257,6 +1350,12 @@ export function buildScene2D(
   }).filter((candidate): candidate is typeof candidate & { range: ActiveRange } => candidate.range !== null);
   if (prepared.length === 0) return empty;
 
+  // Auto vertical layout: order balls by register and space them by amplitude
+  // so the scene reads less crowded (replaces uniform lane spacing).
+  const laneCenters = computeLaneCenters(
+    prepared.map((c) => ({ kind: c.definition.kind, contacts: c.contacts })),
+  );
+
   const drafts: ActorDraft[] = [];
   prepared.forEach((candidate, actorIndex) => {
     const { definition, notes, signal, contacts, supportSpans, longGaps, range } = candidate;
@@ -1276,8 +1375,7 @@ export function buildScene2D(
     );
     planPreliminaryAnchors(
       anchors,
-      actorIndex,
-      prepared.length,
+      laneCenters[actorIndex]!,
       xBias,
       definition.kind,
       contacts,
@@ -1340,5 +1438,6 @@ export function buildScene2D(
     bounds: sceneBounds(actors),
     sourceHitCount,
     representedHitCount,
+    mergeSuggestions: computeMergeSuggestions(actors, beatSec),
   };
 }
