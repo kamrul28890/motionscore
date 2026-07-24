@@ -18,4 +18,8 @@ export type { ParsedArgs, InputType } from './args.js';
 export { runPipeline } from './pipeline.js';
 export type { PipelineResult } from './pipeline.js';
 
+// Re-exported so the web server can auto-prefer neural stems when a GPU is
+// available without depending on @motionscore/note-extractor directly.
+export { detectStemsGpuAvailable } from '@motionscore/note-extractor';
+
 export { main } from './main.js';

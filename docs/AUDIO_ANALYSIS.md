@@ -1,328 +1,344 @@
 # Audio Analysis Subsystem (Stage B)
 
-This document is the reference for how MotionScore turns audio into hittable
-events and scene-level cues. It reflects what is actually implemented today. For
-the higher-level design rationale see `ARCHITECTURE.md` §4 (Stage B); for the
-multi-ball roadmap that builds on this see `MULTI_BALL_PLAN.md`.
+Last updated: 2026-07-23. This document describes the implemented audio analyzers and their current Node contracts.
 
-## Overview
+## 1. Outputs
 
-Audio input is analyzed by a Python (librosa) subprocess that returns a single
-JSON payload. The Node wrapper validates that payload and converts it into the
-pipeline's data contracts. Two products come out of one analysis pass:
+An audio analysis produces three kinds of information with deliberately separate semantics:
 
-1. Discrete ball hits — `NoteEvent[]`, the events the ball strikes.
-2. Scene-level data — a continuous feature timeline plus structural section
-   cues (build/drop/breakdown/rise/fall). These do NOT create ball hits; they
-   are inputs for camera/environment behavior in the renderer.
+1. **Discrete hits** — accepted onsets converted one-to-one into `NoteEvent[]`. These are exact physical contact obligations.
+2. **Full-mix scene features** — 10 Hz loudness, bass, brightness, density, harmonic, and percussive values plus structural section cues.
+3. **Neural role signals** — optional 10 Hz per-role waveform activity, sustain regions, and pitched-register direction from accepted Demucs stems.
 
-```
-audio file
-   |
-   v
-extract_events.py (librosa)          --> analysis.json  { version, durationSec, tempo, mode,
-   | HPSS + low/mid/high onsets                            events[], featureFrames[], sectionCues[] }
-   v
-audio-events.ts  analyzeAudioEvents() --> validates JSON, builds typed AudioAnalysis
-   |                                       (hits: NoteEvent[], featureFrames, sectionCues)
-   v
-note-extractor  extractWithAnalysis() --> { notes, audioAnalysis }
-   |                                       (extract() still returns just NoteEvent[])
-   v
-cli/pipeline    runPipeline()          --> summarizes analysis, extends render to full duration
-   |
-   v
-web             SSE complete event     --> AudioAnalysisSummary -> AnalysisPanel
+A continuous signal never creates or replaces a discrete hit. It tells choreography when support can exist between hits.
+
+```text
+                         +-> extract_events.py (smart/beats/onsets)
+audio -> mode routing --|
+                         +-> extract_stems.py (Demucs stems)
+                                  |
+                                  +-> reuses full-mix features/cues
+                                  +-> per-stem hits + roleSignals
+                                           |
+                                           v
+                         audio-events.ts strict validation
+                                           |
+                                           v
+                         AudioAnalysis + one-to-one NoteEvent[]
+                                           |
+                         +-----------------+------------------+
+                         |                                    |
+                  CLI/UI summary                     live scene2d planner
 ```
 
-## Modes
+## 2. Modes and routing
 
-`extract(inputPath, { mode })` routes by file type and mode:
-
-| Mode | Audio behavior | Notes |
+| Mode | Audio behavior | Intended use |
 |---|---|---|
-| `auto` (default) | Smart stem-aware analysis (`smart`) | Recommended for songs |
-| `beats` | librosa metrical pulse | Sparse; may omit fills/syncopation |
-| `onsets` | All full-mix attacks | Denser, less selective than smart |
-| `notes` | Basic Pitch transcription | Very dense; for sparse solo/pitched recordings |
-| `stems` | Neural per-instrument separation (Demucs `htdemucs_6s`) | Real instrument roles (kick/snare/percussion/bass/piano/guitar/vocal/melodic); needs PyTorch + Demucs, GPU recommended |
+| `auto` | Context-dependent; see below | Default UX |
+| `smart` | librosa HPSS + multi-band role-aware onsets | Lightweight mixed-song analysis |
+| `beats` | librosa metrical pulses | Sparse comparison mode |
+| `onsets` | full-mix attack detection | Dense comparison mode |
+| `notes` | Basic Pitch transcription | Sparse solo/pitched recordings |
+| `stems` | Demucs `htdemucs_6s`, per-instrument events and signals | Highest role identity |
 
-MIDI input ignores `mode` and is parsed as exact notes. `auto` resolves to
-`smart` for audio and to direct parsing for MIDI (never to `stems` — the neural
-path is opt-in because it is heavier).
+MIDI bypasses audio analysis and is parsed directly.
 
-`smart`, `beats`, and `onsets` require Python + librosa. `notes` additionally
-requires Basic Pitch. `stems` additionally requires PyTorch + Demucs. Install
-the lightweight analyzer with `scripts/setup-audio.ps1` (Windows) or
-`scripts/setup-audio.sh` (macOS/Linux); add Basic Pitch with
-`scripts/setup-basic-pitch.*` only if you need `notes`; add the neural stem
-separator with `scripts/setup-demucs.ps1` / `.sh` only if you need `stems`
-(pass `-Cpu` / `--cpu` for a CPU-only build). Point `PYTHON` at the venv
-interpreter.
+`auto` has two intentional meanings:
 
-## Smart mode algorithm
+- **CLI:** resolves to `smart`; use `--mode stems` to request neural separation explicitly.
+- **Web:** probes the configured Python environment. If PyTorch + Demucs are installed and CUDA is available, it resolves to `stems`; otherwise it resolves to `smart`.
+
+This keeps command-line behavior predictable while letting the local web app use the installed GPU automatically.
+
+Dependencies:
+
+- `smart` / `beats` / `onsets`: Python + librosa;
+- `notes`: Basic Pitch;
+- `stems`: PyTorch + Demucs (GPU recommended, CPU supported).
+
+Use `scripts/setup-audio.ps1` or `.sh` for the lightweight analyzer and `scripts/setup-demucs.ps1` or `.sh` for neural stems. Set `PYTHON` to the desired interpreter, e.g. `.\.venv\Scripts\python.exe` on Windows.
+
+## 3. Lightweight analyzer
 
 Implemented in `packages/note-extractor/python/extract_events.py`.
 
-1. STFT magnitude, then HPSS (`librosa.decompose.hpss`) to approximate a
-   harmonic and a percussive spectrogram.
-2. Onset-strength envelopes for the full mix, the percussive component, and the
-   harmonic component. `onset_strength_multi` produces independent low / mid /
-   high frequency-band envelopes for both HPSS components.
-3. Frequency bands: low 20-180 Hz, mid 180-2000 Hz, high 2000 Hz-Nyquist.
-4. Per-role envelopes are combined from those channels and peak-picked
-   independently, producing candidate attacks for each role:
-   - `kick` — percussive low band
-   - `bass` — harmonic low band
-   - `snare` — percussive mid band
-   - `percussion` — percussive high band
-   - `melodic` — harmonic mid/high band
-5. Each candidate gets a `salience` (role strength + full-mix confirmation +
-   a small on-beat bonus) and a `confidence`.
-6. Candidates within `MERGE_WINDOW_SEC` are merged; the highest-ranked role
-   wins the slot, and overlapping roles slightly boost salience/confidence.
-7. Repetitive low-value hits (e.g. constant hi-hats) are suppressed, and a
-   per-second cap keeps density sane.
-8. A position hint is written into `pitchMidi` (a role base, slew-limited so it
-   cannot jump across the screen between close events). For mixed audio this is
-   a choreography hint, not a real pitch.
+### Smart mode
 
-`beats` and `onsets` reuse the same envelopes/roles but select events from the
-beat tracker or the full-mix onset detector respectively, so they remain useful
-comparison baselines.
+1. Decode at 22,050 Hz and compute an STFT.
+2. Use HPSS to approximate harmonic and percussive components.
+3. Build full-mix and independent low/mid/high onset-strength envelopes.
+4. Form role candidates:
+   - kick: percussive low band;
+   - bass: harmonic low band;
+   - snare: percussive mid band;
+   - percussion: percussive high band;
+   - melodic: harmonic mid/high band.
+5. Score each candidate with role strength, full-mix confirmation, salience, confidence, and a small metrical bonus.
+6. Merge near-simultaneous candidates according to the lightweight analyzer's perceptual merge policy and enforce its minimum retrigger spacing.
+7. Emit a role-based `pitchMidi` choreography hint. It is not a literal pitch claim for drum transients.
 
-### Tuning constants (Python)
+The former fixed `MAX_HITS_PER_SECOND=8` cap has been removed. Density now emerges from onset peak selection, `MERGE_WINDOW_SEC`, and `MIN_HIT_GAP_SEC`; there is no separate per-second truncation pass.
 
-| Constant | Value | Meaning |
-|---|---|---|
-| `SAMPLE_RATE` | 22050 | Analysis sample rate |
-| `N_FFT` / `HOP_LENGTH` | 2048 / 512 | STFT window / hop (~23 ms frames) |
-| `FEATURE_RATE_HZ` | 10 | Feature-frame timeline rate |
-| `MERGE_WINDOW_SEC` | 0.095 | Simultaneous-hit merge window |
-| `MIN_HIT_GAP_SEC` | 0.09 | Minimum spacing between kept hits |
-| `MAX_HITS_PER_SECOND` | 8 | Density safety cap |
-| `MAX_AUDIO_DURATION_SEC` | 720 | Hard input limit (12 min); longer input is rejected |
+`beats` and `onsets` share the feature/role machinery but select timestamps from the beat tracker or full-mix onset detector.
 
-The duration limit bounds decoded-audio and spectrogram memory. Split longer
-mixes before analysis.
+### Main constants
 
-## Stems mode (neural per-instrument analysis)
+| Constant | Value | Purpose |
+|---|---:|---|
+| `SAMPLE_RATE` | 22050 | analysis sample rate |
+| `N_FFT` / `HOP_LENGTH` | 2048 / 512 | spectral window/hop |
+| `FEATURE_RATE_HZ` | 10 | feature timeline rate |
+| `MERGE_WINDOW_SEC` | 0.095 | perceptual simultaneous-candidate merge |
+| `MIN_HIT_GAP_SEC` | 0.09 | analyzer retrigger spacing |
+| `MAX_AUDIO_DURATION_SEC` | 720 | decoded-audio/spectrogram memory guard |
 
-Implemented in `packages/note-extractor/python/extract_stems.py`. Selected with
-`--mode stems`. This is the fix for the smart analyzer's biggest weakness: its
-roles are frequency-band guesses, so a piano gets mislabeled as kick/bass/snare.
-Stems mode separates the mix into real instruments first, so a piano onset is
-labeled `piano` and a guitar onset `guitar`.
+The 12-minute duration guard rejects longer input; split longer files before analysis.
 
-1. Demucs `htdemucs_6s` separates the mix into six waveforms: `drums`, `bass`,
-   `other`, `vocals`, `guitar`, `piano`. Runs on CUDA when available and falls
-   back to CPU on any CUDA runtime error (e.g. out-of-memory).
-2. Each stem's RMS loudness is measured. Stems quieter than
-   `max(STEM_PRESENCE_ABS, STEM_PRESENCE_REL x loudest_stem)` are treated as
-   separation bleed and skipped entirely. Without this gate every stem's onset
-   envelope is normalized independently, so a near-silent stem amplifies its
-   noise floor into phantom hits — a solo piano would otherwise spawn hundreds
-   of "kick" and "bass" events. The gate keeps every stem on a full band (all
-   are loud) while collapsing an isolated instrument to just its own role.
-3. Onsets are detected per surviving stem. Non-drum stems map directly to a
-   role (`bass`->bass, `vocals`->vocal, `guitar`->guitar, `piano`->piano,
-   `other`->melodic). The isolated `drums` stem is band-split into `kick`
-   (20-140 Hz), `snare` (140-2500 Hz), and `percussion` (2500 Hz-Nyquist).
-4. For pitched roles the ball's position hint (`pitchMidi`) blends the role base
-   with the stem's spectral centroid, so e.g. a bass line's ball tracks its
-   register. A per-role minimum gap (`ROLE_MIN_GAP`) prevents an instrument from
-   re-striking implausibly fast.
-5. Continuous feature frames and section cues are computed from the full mix by
-   reusing `extract_events.py`, so the JSON schema is byte-for-byte identical to
-   the librosa analyzer (only `mode` differs). Everything downstream
-   (mapper/solver/renderer, `per-role` multi-ball) is unchanged.
+## 4. Neural stems analyzer
 
-### Stems tuning constants (Python)
+Implemented in `packages/note-extractor/python/extract_stems.py`.
 
-| Constant | Value | Meaning |
-|---|---|---|
-| `MODEL_NAME` | `htdemucs_6s` | Demucs 6-source model (adds guitar + piano over the 4-stem default) |
-| `STEM_PRESENCE_REL` | 0.12 | Min fraction of the loudest stem's RMS for a stem to count as present |
-| `STEM_PRESENCE_ABS` | 5e-4 | Absolute RMS floor for presence |
-| `ROLE_MIN_GAP` | 0.09 s | Minimum spacing between hits within one instrument |
-| `ROLE_DELTA` | 0.06-0.09 | Per-role onset peak-pick sensitivity (lower = more hits) |
+### 4.1 Separation and presence gating
 
-The neural model (~170 MB) downloads automatically on first use and is cached by
-Demucs. Stems mode is denser than smart mode (each instrument contributes its
-own onsets); role-aware thinning downstream keeps it playable, and `per-role`
-multi-ball spreads the load across one ball per instrument.
+Demucs `htdemucs_6s` separates `drums`, `bass`, `other`, `vocals`, `guitar`, and `piano`. CUDA is used when available; a CUDA runtime failure falls back to CPU.
 
-## Continuous features and section cues
+Each separated waveform is measured before downstream normalization. A stem is accepted only when its RMS clears both an absolute floor and a fraction of the loudest stem:
 
-A feature frame is emitted every 0.1 s with normalized `loudness`, `bassEnergy`,
-`brightness`, `onsetDensity`, `harmonicEnergy`, and `percussiveEnergy`.
+| Constant | Value | Purpose |
+|---|---:|---|
+| `STEM_PRESENCE_REL` | 0.12 | fraction of loudest stem RMS |
+| `STEM_PRESENCE_ABS` | `5e-4` | absolute RMS floor |
 
-Section cues are derived from trends measured against the track's own dynamic
-range (robust percentiles), not absolute thresholds, so they stay rare and
-meaningful across genres and loudness levels:
+This prevents near-silent bleed from becoming hundreds of phantom onsets after per-stem normalization.
 
-- `drop` — a transition from a genuine dip (low relative to the whole track)
-  into a sustained high-energy section, confirmed by a bass jump, aligned to the
-  transient edge. Selected as the prominent peaks of a whole-song
-  "drop-likelihood" curve (`scipy.signal.find_peaks` with height/prominence
-  derived from the track's own candidate distribution). There is no fixed
-  cooldown or count cap — the number of drops emerges from the track; the only
-  spacing is a ~1 s perceptual de-duplication of a single transient.
-- `build` — a rising trend that climbs into the high-energy band; retimed to end
-  exactly on a following drop, giving offline rendering lookahead.
-- `breakdown` — a sustained fall into a low-energy section.
-- `rise` / `fall` — gentler sustained trends; capped to the strongest few.
+### 4.2 Discrete events
 
-These are intentionally not ball hits. They are the hooks for camera moves,
-environment vibration, long pre-drop suspension, and lighting once the renderer
-consumes them.
+Accepted non-drum stems map directly:
 
-An earlier version used absolute thresholds with a 3 s cooldown and over-fired
-badly (e.g. ~35 "drops" in a 2.5 min track, and drops even on solo piano). The
-whole-song, distribution-relative peak analysis above replaced it and produces
-emergent counts (roughly: solo piano 1, a blues track 4, a dense EDM track 3-4).
+- bass -> `bass`;
+- other -> `melodic`;
+- vocals -> `vocal`;
+- guitar -> `guitar`;
+- piano -> `piano`.
 
-## Known limitations
+The drums stem is split spectrally into kick, snare, and percussion onset streams. Pitched stems use spectral information to provide a register-oriented `pitchMidi` hint. Per-role peak-picking sensitivity and minimum spacing belong to onset extraction itself; once an event is emitted, TypeScript preserves it.
 
-- Role labels in `smart`/`beats`/`onsets` are heuristic. Roles come from HPSS +
-  fixed frequency bands, so they are only meaningful for percussive/electronic
-  material. A solo piano is labelled as kick/bass/snare — the onsets are real,
-  but the instrument names are not. Use `--mode stems` (Demucs source
-  separation) for real per-instrument labels (piano/guitar/vocal/bass/drums);
-  the frequency-band heuristic only applies to the librosa modes.
-- Cue detection is heuristic (energy/bass trends), not semantic. It will miss or
-  mislabel some structural boundaries; Essentia/MSAF are the planned upgrade.
-- Hit density (~3-5 hits/s on full mixes) is tuned for a single ball; multi-ball
-  (`per-role`) spreads these across balls, and voice-aware merging (Phase 3)
-  will let it keep even more simultaneous cross-role hits.
+Relevant constants:
 
-## JSON schema (Python -> Node)
+| Constant | Value | Purpose |
+|---|---:|---|
+| `MODEL_NAME` | `htdemucs_6s` | six-source Demucs model |
+| `ROLE_MIN_GAP` | `0.09 s` | per-role neural onset retrigger spacing |
+| `ROLE_DELTA` | `0.06–0.09` | role-specific peak-pick sensitivity |
+
+### 4.3 Continuous `roleSignals`
+
+The accepted separated waveforms also produce a compact timeline at 10 Hz. This is not onset-derived activity: it comes from the role waveform/spectrum, so held bass, guitar, piano, melodic, and vocal material remains visible between attacks.
+
+For every canonical role, the extractor emits:
+
+- normalized smoothed activity quantized to Q8 (`0..255`);
+- sorted sustain spans on the shared frame grid;
+- for pitched roles, median-smoothed register direction (`-1`, `0`, `1`) and Q8 pitch-estimate coverage.
+
+The canonical track order is:
+
+```text
+kick, snare, percussion, bass, melodic, piano, guitar, vocal
+```
+
+Tracks for absent roles are present but contain zero activity and no sustains. This fixed shape simplifies validation and deterministic grouping.
+
+### 4.4 Full-mix features
+
+Stems mode reuses `extract_events.py` for full-mix feature frames and section cues, but its payload is **not byte-identical** to lightweight mode: it additionally includes `roleSignals` and uses per-stem events.
+
+## 5. Python JSON payload
+
+Representative stems payload (arrays abbreviated):
 
 ```json
 {
   "version": 1,
   "durationSec": 182.4,
   "tempo": 128.0,
-  "mode": "smart",
+  "mode": "stems",
   "events": [
-    { "timeSec": 1.203, "pitchMidi": 60, "velocity": 0.82,
-      "role": "kick", "confidence": 0.91, "salience": 0.88 }
+    {
+      "timeSec": 1.203,
+      "pitchMidi": 60,
+      "velocity": 0.82,
+      "role": "kick",
+      "confidence": 0.91,
+      "salience": 0.88
+    }
   ],
   "featureFrames": [
-    { "timeSec": 0.1, "loudness": 0.54, "bassEnergy": 0.61, "brightness": 0.42,
-      "onsetDensity": 0.35, "harmonicEnergy": 0.48, "percussiveEnergy": 0.67 }
+    {
+      "timeSec": 0.1,
+      "loudness": 0.54,
+      "bassEnergy": 0.61,
+      "brightness": 0.42,
+      "onsetDensity": 0.35,
+      "harmonicEnergy": 0.48,
+      "percussiveEnergy": 0.67
+    }
   ],
   "sectionCues": [
-    { "type": "drop", "startSec": 44.0, "endSec": 44.5, "peakSec": 44.0,
-      "intensity": 0.9, "confidence": 0.85 }
-  ]
+    {
+      "type": "drop",
+      "startSec": 44.0,
+      "endSec": 44.5,
+      "peakSec": 44.0,
+      "intensity": 0.9,
+      "confidence": 0.85
+    }
+  ],
+  "roleSignals": {
+    "version": 1,
+    "frameRateHz": 10,
+    "frameCount": 1824,
+    "tracks": [
+      {
+        "role": "kick",
+        "activityQ8": [0, 18, 240],
+        "sustainSpans": [[1, 3]]
+      },
+      {
+        "role": "bass",
+        "activityQ8": [0, 96, 180],
+        "sustainSpans": [[1, 3]],
+        "pitchDirection": [0, 1, 1],
+        "pitchCoverageQ8": 231
+      }
+    ]
+  }
 }
 ```
 
-The Node wrapper (`audio-events.ts`) treats this payload as untrusted: it
-rejects a wrong `version`, a `mode` mismatch, missing arrays, and out-of-range
-or non-finite required fields with a `TranscriptionError` rather than silently
-defaulting. The analyzer subprocess also has a 15-minute watchdog timeout.
+The abbreviated example omits the remaining canonical tracks and most frame values; real payloads contain all eight tracks and arrays exactly `frameCount` long.
 
-## Node data contracts
+## 6. Node validation and contracts
 
-`analyzeAudioEvents()` returns the rich `AudioAnalysis`:
+`packages/note-extractor/src/audio-events.ts` treats the subprocess result as untrusted. Invalid output becomes a `TranscriptionError` rather than being defaulted silently.
+
+For `roleSignals`, validation requires:
+
+- `version === 1`;
+- `frameRateHz === 10`;
+- `frameCount === featureFrames.length`;
+- exactly eight tracks in canonical `ROLE_ORDER`;
+- each `activityQ8` length equals `frameCount`, with integer values `0..255`;
+- spans are integer, in range, ordered, and non-overlapping;
+- pitch-direction arrays have the same frame count and contain only `-1|0|1`;
+- pitch fields appear only on bass, melodic, piano, guitar, or vocal;
+- pitch coverage is an integer `0..255`.
+
+The shared contract is additive:
 
 ```ts
+type PitchDirection = -1 | 0 | 1;
+type SustainSpan = [startFrame: number, endFrame: number];
+
+interface RoleSignalTrack {
+  role: HitRole;
+  activityQ8: number[];
+  sustainSpans: SustainSpan[];
+  pitchDirection?: PitchDirection[];
+  pitchCoverageQ8?: number;
+}
+
+interface RoleSignals {
+  version: 1;
+  frameRateHz: number;
+  frameCount: number;
+  tracks: RoleSignalTrack[];
+}
+
 interface AudioAnalysis {
   version: 1;
   durationSec: number;
   tempoBpm: number;
-  mode: 'smart' | 'beats' | 'onsets' | 'stems';
+  mode: AudioAnalysisMode;
   hits: NoteEvent[];
   featureFrames: AudioFeatureFrame[];
   sectionCues: SectionCue[];
+  roleSignals?: RoleSignals;
 }
 ```
 
-`NoteEvent` gained optional fields, all backward-compatible with MIDI:
+Non-stems modes omit `roleSignals` and remain backward-compatible.
 
-```ts
-interface NoteEvent {
-  id: string; pitchMidi: number; startSec: number; endSec: number; velocity: number;
-  source?: 'midi' | 'audio';   // provenance; audio enables choreography hints
-  role?: 'kick' | 'bass' | 'snare' | 'percussion' | 'melodic'
-       | 'vocal' | 'piano' | 'guitar';   // vocal/piano/guitar only from stems mode
-  confidence?: number;         // [0,1]
-  salience?: number;           // [0,1] musical importance
-  track?: string; instrument?: string;
-}
-```
+## 7. One-to-one hit conversion
 
-`source` is the important discriminator: the mapper only applies audio-only
-lane/slew choreography hints when `source === 'audio'`, so a role-tagged MIDI
-event still maps by exact pitch.
+After the raw payload passes validation, `buildNoteEvents()`:
 
-`extract()` still returns `NoteEvent[]` for backward compatibility.
-`extractWithAnalysis()` returns `{ notes, audioAnalysis? }` so the pipeline can
-use the source duration and (later) the cues.
+1. filters only invalid/non-finite negative timestamps;
+2. stable-sorts by `timeSec`;
+3. maps every remaining raw event to one sequentially identified `NoteEvent`;
+4. carries role, confidence, salience, velocity, and choreography pitch hint.
 
-## Pipeline integration
+There is no TypeScript `MIN_EVENT_GAP_SEC`, priority function, role-aware thinning, or event-count cap. If several accepted events are exactly co-timed, all remain in `AudioAnalysis.hits`. The race planner may give same-group co-timed notes one physical contact, but that contact stores all note IDs, preserving representation.
 
-`runPipeline` (in `packages/cli/src/pipeline.ts`):
+## 8. Full-mix features and section cues
 
-- calls `extractWithAnalysis`, so it has the analyzed source duration;
-- extends the solved trajectory with a terminal hold to the full source
-  duration, so the video no longer ends on the last hit while audio continues;
-- builds a compact `AudioAnalysisSummary` and returns it in `PipelineResult`;
-- the CLI prints mode/tempo/hit-count/roles/cue counts on success.
+A feature frame is emitted every 0.1 seconds with normalized:
 
-```ts
-interface AudioAnalysisSummary {
-  mode: 'smart' | 'beats' | 'onsets' | 'stems';
-  tempoBpm: number;
-  durationSec: number;
-  hitCount: number;
-  roleCounts: Record<HitRole, number>;
-  roleActivity: Record<HitRole, number[]>;   // per role: ROLE_ACTIVITY_BINS (56) normalized [0,1] bins over [0,duration]
-  sectionCues: SectionCue[];
-  energyTimeline: { timeSec: number; loudness: number; bassEnergy: number }[]; // <=160 pts
-}
-```
+- `loudness`;
+- `bassEnergy`;
+- `brightness`;
+- `onsetDensity`;
+- `harmonicEnergy`;
+- `percussiveEnergy`.
 
-The full 10 Hz feature frames stay server-side; only the downsampled
-`energyTimeline` is sent to the browser. `roleActivity` bins each roled hit by
-onset time (accumulating velocity), then normalizes **each role against its own
-peak bin** so the UI shows *when* an instrument plays independent of its
-absolute loudness. Role display order, colors, and labels come from the shared
-`ROLE_ORDER` / `ROLE_COLORS` / `ROLE_LABELS` in `@motionscore/types` — the same
-`ROLE_COLORS` the mapper uses for each per-role ball's `colorHint`, so a role's
-legend swatch always matches its ball tint in the video.
+Section cues are derived from trends relative to the track's own distribution rather than fixed loudness thresholds:
 
-## Web integration
+- `drop`: dip-to-high-energy transition, bass-confirmed;
+- `build`: rising trend leading into high energy/drop;
+- `breakdown`: sustained move into low energy;
+- `rise` / `fall`: gentler sustained trends.
 
-- `POST /api/generate` accepts `mode` (`auto|beats|onsets|notes|stems`).
-- The pipeline's verbose stage logs are parsed into SSE progress events. Stage
-  percentages match the real emitted stage names, and the streaming
-  `render + encode` stage advances 42%->98% from `render+encode progress: N/M`
-  lines (previously it sat at 0%). The client uses the last defined percent so
-  interleaved messages never reset the bar.
-- The SSE `complete` event carries `AudioAnalysisSummary`, rendered by
-  `AnalysisPanel`: tempo, hits, an **"Instruments over time"** block (one row per
-  active role with its ball-color swatch, instrument name, an SVG activity strip
-  from `roleActivity`, and a hit count), an SVG energy timeline with drop
-  markers, and a section-cue list. The client mirrors the role palette in
-  `src/roleMeta.ts` (the client is a standalone Vite bundle, so it duplicates the
-  `@motionscore/types` values on purpose; they must stay identical). The panel
-  notes that cues are detected but not yet animated.
+They are structural hints, not ball hits. The current race treats discrete role events and neural sustains as primary truth, using cues only for longer phrase shaping where appropriate.
 
-## Files
+## 9. Pipeline and UI summaries
+
+`runPipeline()` returns both the full `AudioAnalysis` for the live scene and a compact `AudioAnalysisSummary` for UI/status reporting.
+
+`roleActivity` contains `ROLE_ACTIVITY_BINS` normalized values per role:
+
+- stems mode with `roleSignals`: bins waveform activity, retaining held material;
+- other modes or older payloads: bins event velocity by onset as fallback.
+
+Each role is normalized against its own peak so the strip shows when it participates rather than comparing absolute stem loudness. The summary also contains tempo, duration, hit count, role counts, section cues, and a downsampled energy timeline.
+
+## 10. Web integration
+
+- `POST /api/generate` accepts `auto|beats|onsets|notes|stems`. `smart` is the lightweight analyzer selected by `auto`, not a separate web form value.
+- Full analysis is available from `/api/result/:jobId`; the source audio is served through `/api/audio/:jobId` for deterministic live playback.
+- The analysis panel displays role counts/activity, energy, and cues.
+- `LiveScene` consumes full hits and `roleSignals` to build the semantic race. Role visibility is explicit; there is no hidden “busiest roles” cap.
+
+## 11. Known limitations
+
+- `smart`/`beats`/`onsets` role labels are HPSS/frequency-band heuristics. Use `stems` when instrument identity matters.
+- Demucs separation can still leak sources; presence gating handles near-silent bleed but cannot make overlapping instruments perfectly isolated.
+- Neural onset density is intentionally preserved downstream. Visual cleanup must happen through adaptive geometry/grouping, not silent event deletion.
+- Cue detection is energy/trend-based rather than semantic song-form understanding.
+- The input-duration guard and subprocess watchdog are resource/safety boundaries, not musical-density caps.
+
+## 12. Files
 
 | File | Responsibility |
 |---|---|
-| `packages/note-extractor/python/extract_events.py` | librosa HPSS/onset analysis, roles, merging, features, cues |
-| `packages/note-extractor/python/extract_stems.py` | Demucs `htdemucs_6s` separation, per-stem onsets, energy gate (stems mode) |
-| `packages/note-extractor/src/audio-events.ts` | subprocess, script routing by mode, strict JSON validation, timeout, contract conversion |
-| `packages/note-extractor/src/index.ts` | `extract` / `extractWithAnalysis` routing |
-| `packages/types/src/data-contracts.ts` | `NoteEvent`, `AudioAnalysis`, `AudioAnalysisSummary`, `SectionCue`, ... |
-| `packages/types/src/validators.ts` | runtime validation of the above |
-| `packages/cli/src/pipeline.ts` | analysis summary + full-duration render hold |
-| `packages/web/src/server.ts` | mode validation, SSE progress + analysis forwarding |
-| `packages/web/src/client/src/components/AnalysisPanel.tsx` | analysis visualization |
-| `scripts/setup-audio.*` | lightweight librosa setup |
-| `scripts/setup-demucs.*` | PyTorch + Demucs setup for `stems` mode (CUDA default, `--cpu` fallback) |
+| `packages/note-extractor/python/extract_events.py` | librosa modes, features, cues |
+| `packages/note-extractor/python/extract_stems.py` | Demucs separation, per-role events, waveform signals |
+| `packages/note-extractor/src/audio-events.ts` | subprocess routing, strict validation, one-to-one conversion |
+| `packages/note-extractor/src/index.ts` | public extract APIs |
+| `packages/types/src/data-contracts.ts` | shared event/analysis/role-signal contracts |
+| `packages/cli/src/pipeline.ts` | full analysis forwarding and compact summaries |
+| `packages/web/src/server.ts` | web mode selection and result/audio endpoints |
+| `packages/web/src/client/src/components/AnalysisPanel.tsx` | compact analysis visualization |
+| `packages/web/src/client/src/scene2d/model.ts` | role-signal-driven race planner |
+| `scripts/setup-audio.*` | lightweight environment setup |
+| `scripts/setup-demucs.*` | neural environment setup |

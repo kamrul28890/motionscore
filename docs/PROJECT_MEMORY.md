@@ -1,78 +1,147 @@
 # Project Memory (quick resume)
 
-Brief state + next steps so work can resume if context is lost. Keep terse.
+Last updated: 2026-07-23. This file is the current source of truth for the implemented system; discarded fixed-lane, impulse, and R3F experiments are summarized under **Superseded designs** rather than described as current behavior.
 
 ## What this is
-- MotionScore: music (MIDI/audio) -> physics video. TS monorepo (npm workspaces, `tsc -b`) + Python librosa analysis.
-- Pipeline: extract (Stage B) -> mapNotes (C) -> planVoices -> solveChoreography (D) -> renderAndEncodeVoices + ffmpeg (E/F).
 
-## Done
-- Smart audio analyzer (Python): HPSS + low/mid/high onset fusion; roles (kick/bass/snare/percussion/melodic), salience, confidence; 10 Hz feature frames; section cues (build/drop/breakdown/rise/fall).
-- Strict analyzer JSON validation + subprocess timeout + max-duration guard.
-- `NoteEvent` gained `source`('midi'|'audio'), `role`, `confidence`, `salience`. `AudioAnalysis` + `AudioAnalysisSummary` contracts.
-- Web: mode selector, analysis panel (roles histogram, energy sparkline, cue list), fixed progress-percent mapping.
-- Multi-ball (Phases 1-2 DONE): contracts `VoicePlan`/`Voice`/`Choreography`/`VoiceGrouping`; `planVoices` (mapper); `solveChoreography` (solver); `renderAndEncodeVoices` (N tinted balls); `--balls single|per-role` (CLI) + web "Balls" selector (default single). Source-duration hold. ffmpeg stdin robustness (odd-dim = clean error, no listener leak).
-- Cue detector reworked to whole-song relative (no arbitrary time/count caps) per user request.
-- Neural stems mode DONE (`--mode stems`, opt-in): HitRole expanded to 8 (added vocal/piano/guitar) across types/validators/mapper lanes+colors/web panel/pipeline roleCounts; AudioAnalysisMode + ExtractionMode + CLI `--mode` + web selector gained `stems`. `extract_stems.py` = Demucs `htdemucs_6s` -> per-stem onsets (drums band-split kick/snare/percussion; bass/other->melodic/vocals/guitar/piano map direct); reuses extract_events.py for features/cues; CUDA with CPU fallback. audio-events.ts routes mode==='stems' to extract_stems.py. Thinning role-aware in buildNoteEvents; single-ball reachability thinning in planVoices.
-  - KEY FIX: per-stem RMS energy gate (`STEM_PRESENCE_REL=0.12`, `STEM_PRESENCE_ABS=5e-4`) skips near-silent bleed stems, so an isolated instrument does NOT spawn phantom hits in every role. Without it a solo piano produced ~290 phantom "kick" hits.
-  - VERIFIED on GPU (GTX 1060, cuda=True): solo piano -> `piano` only (82 raw, 76 after thinning, 1 piano ball, 0.00ms sync, video OK); Gary Moore blues -> active drums/bass/other/vocals/guitar, guitar=812 (piano correctly gated out). Full CLI pipeline green end-to-end.
-  - Env: torch 2.4.1+cu121 + demucs 4.0.1 in `.venv` (coexist with librosa 0.11.0/numpy 2.4.6/scipy 1.18.0). `scripts/setup-demucs.ps1`+`.sh` (CUDA default, `-Cpu`/`--cpu`). Model ~170MB auto-downloads first run (cached).
-  - Build/tests GREEN: `tsc -b`, vitest 110/110 (17 files), web build. Docs updated: AUDIO_ANALYSIS.md (stems section+tuning), MULTI_BALL_PLAN.md (Phase 3 stems DONE), README.md (mode+setup+examples).
-  - OPEN (not blocking): stems raw density high (blues ~5831 events/251s across 7 roles ~3-4.6/s per role) — playable per-role; density tuning is a future refinement.
-- Per-role activity viz DONE: shared role metadata is now single-source in `@motionscore/types` — `ROLE_ORDER`, `ROLE_COLORS`, `ROLE_LABELS`, `ROLE_ACTIVITY_BINS`(56). Mapper imports these (removed its local `ROLE_VOICE_COLOR`/`ROLE_ORDER`), so a ball's tint == its legend swatch. `AudioAnalysisSummary` gained `roleActivity: Record<HitRole, number[]>` (per role: 56 velocity-binned-by-onset values, normalized to that role's own peak). Built in `pipeline.summarizeAnalysis`. Web `AnalysisPanel` now renders "Instruments over time": per active role a color swatch + instrument name + SVG activity strip + count. Client mirrors palette in `packages/web/src/client/src/roleMeta.ts` (decoupled Vite bundle; keep identical to types). Verified: mode auto on download.mp3 -> kick 48/56 active bins peak 1.00, percussion 12/56, etc. `tsc -b`/vitest 110-110/web build GREEN.
-- DECISION — ball show/hide + real-time controls (user asked): true real-time show/hide during playback belongs to the FUTURE interactive (three.js) renderer, because the current output is a baked MP4 (can't toggle balls after encode). Achievable NOW without the live renderer = a pre-render role include/exclude filter passed to `planVoices` (chicken-and-egg: roles known only after analysis, so best UX is analyze->show role chips->pick->render, or generic 8-role checkboxes). "Tuning bars" = a density/sensitivity slider mapping to `ROLE_DELTA`/`ROLE_MIN_GAP` (stems) or `maxNotesPerSecond` (mapper). Documented as next steps; not built yet.
-- Render perf + RAM (Phase 1 DONE, VERIFIED): fixed slow/high-RAM streaming render, esp. multi-ball. In `stream-render.ts`: (A1) build the background+keys ONCE into an offscreen `staticCanvas` and blit per frame (was redrawing every target every frame — the dominant multi-ball cost); (A4) stop precomputing `positions[totalFrames]` per voice — interpolate lazily each frame into a reused length-`voices` scratch (`framePositions`); (A2) stop `Buffer.from(getImageData().data.buffer)` (~8 MiB alloc/frame) — copy `canvas.data()` (live pixel view, byte-identical RGBA) into 2 reused `Buffer.allocUnsafe` written alternately (backpressure drains each large write before reuse); (A6a) libx264 defaults to `-preset veryfast`. In `pipeline.ts`: `resolveCodec()` — explicit `--codec` wins, else `detectAvailableEncoders()` (real 1-frame test-encode per codec) and prefer `h264_nvenc`>`h264_amf`>`h264_qsv`>`libx264`; verbose "select encoder" log. VERIFIED: 1080p 5-ball 66.7s render -> 29s render+encode (faster than realtime), peak node RSS 102.5 MiB (was churning), colors correct (no R/B swap), valid mp4. NOTE: on THIS box NVENC did NOT pass the test-encode (GTX 1060 present) so auto-select fell to h264_qsv; user can `--codec h264_nvenc` to see the actual ffmpeg error (driver/session issue, not our bug).
-- Impact "juice" (squash/stretch, bloom, shards, key-flash, screen-shake, additive trails) was added then REVERTED at user request (`git checkout HEAD -- stream-render.ts`, then Phase-1 perf edits re-applied). Reason: with dense multi-ball events the effects (esp. screen shake) never stopped and read as noise; user clarified they did NOT want extra effects — they want a PROPER CONNECTION between tracks/instruments and the balls/events so it's satisfying per beat. stream-render.ts now = perf-only baseline (plain circles, simple rings + trail). Do NOT re-add per-event effects as the fix.
-- DIAGNOSIS (confirmed by subagent review, this session): dissatisfaction is a RENDERING/LAYOUT problem, NOT analysis. Evidence: analyzer computes sectionCues, 10Hz energy/featureFrames, roleActivity, salience, confidence, tempo/beats — renderer consumes NONE (renderAndEncodeVoices takes only voices+RenderConfig+ExportConfig; analysis attached to result for web AnalysisPanel only, pipeline.ts). Layout is a STATIC horizontal target row (mapNotes sets every target y=targetY; 'lanes' only varies x) with a FIXED camera (no ctx transform). salience/confidence are DROPPED at mapNotes (never reach ChoreographyTarget). Density: stems ROLE_MIN_GAP=0.09s, ROLE_DELTA 0.06-0.09 -> up to ~11 hits/s/role across up to 8 roles, all on one bottom row -> strobing, not music. Thinning is physical (velocity/impactSize), never salience-based.
-- PLAN (agreed direction pending final user confirm): fix RENDERING, not analysis. Shared low-regret groundwork first (useful for any renderer): (1) thread AudioAnalysis (cues+energy+roleActivity) into the render contract; (2) carry salience/confidence through mapNotes into ChoreographyTarget (+validators, backward-compatible optional fields); (3) beat/section-aware emphasis + a density/sensitivity control to cut chaos. THEN the renderer: target = the planned Three.js/R3F REAL-TIME renderer in the web app (matches MULTI_BALL_PLAN Phase 4; gives real-time ball show/hide + a premium camera; GTX 1060 handles it), keeping the existing 2D node-canvas path as the interim baked-MP4 export. Camera + non-static "world" (scroll/flow) reacting to sectionCues+energy is the core of "satisfying".
+MotionScore turns MIDI or analyzed audio into synchronized physical animation. It is a TypeScript npm-workspace monorepo with Python/librosa/Demucs analysis, a deterministic browser Canvas 2D scene, and a legacy `@napi-rs/canvas` + ffmpeg video path.
 
-## CURRENT live renderer = 2D DoodleChaos (Three.js REMOVED)
-The R3F/Three.js "ride" renderer was REJECTED by the user (overwhelming, random, misaligned) and fully REMOVED (deleted components/ride/* + RideScene.tsx; uninstalled three/@react-three/fiber/@react-three/drei; client bundle 1.15MB->214KB). Replaced by a strict, deterministic 2D canvas visualizer per the user's spec.
-2D DESIGN (shipped, build green — visuals need user viewing): time->X (x=t*SCROLL_X, SCROLL_X=6), whole scene drifts down (y+=t*DRIFT_Y, 1.1). A FEW balls (default busiest 3 roles, cap via "Max balls") each bounce on beat-aligned parabolic SUVAT arcs (contact=on the beat, apex between) around their own lane; on rise/fall section cues they GLIDE along a line instead (jump-free sine hump). Minimalist: near-white paper bg (#f7f7f4), near-black (#161616) track = short "kicker" tick at each contact (angled along drift) + slide polylines; solid role-colored balls (ROLE_COLORS) + short trail. Camera is POSITION-ONLY (no audio reaction/shake): follows ball x (+lookahead, ball ~30% from left), centers vertical envelope, fit-zoom to a ~3s window (WINDOW_SEC=3) with 12% margins, exp-lerp smoothing, snaps on seek.
-MODULE (framework-agnostic, ctx-based so it can be shared with the MP4 exporter later): packages/web/src/client/src/scene2d/ = types.ts (Ctx2D minimal interface both browser + @napi-rs/canvas satisfy; Actor/Kicker/SlidePath/CameraState/RenderFrame), settings.ts (Scene2DSettings {roleVisible, maxActors=3} + DEFAULT + merge), model.ts (buildScene2D(analysis,settings)->{actors,...}; sampleActor(actor,t); constants SCROLL_X/DRIFT_Y/BALL_R/HOP_*/SLIDE_*; chooseRoles=visible & busiest capped), render.ts (createCamera, renderScene2D(ctx,model,frame) = updateCamera + draw), index.ts. Pure/deterministic; sampleActor is closed-form.
-INTEGRATION: LiveScene.tsx = plain <canvas> + ResizeObserver + requestAnimationFrame loop reading audio.currentTime (clock) + wall-clock dt for camera smoothing; seek detected by audio-time jump>0.35 -> camera.inited=false (snap). model via useMemo(buildScene2D(analysis,settings)); modelRef + cameraRef. RideControls.tsx reduced to role chips + Max-balls slider. App.tsx uses Scene2DSettings/DEFAULT_SCENE_SETTINGS. server /api/result + /api/audio unchanged (still needed). Cat DROPPED.
-VERIFIED: tsc -b + web build (client 214KB + server) + strict client tsc --noEmit + vitest 110/110 all green. Can't verify visuals headless.
-FOLLOW-UPS: (1) share scene2d with the MP4 exporter (stream-render.ts) so the downloaded video matches the live 2D view — currently export still uses the OLD 2D piano-key renderer. (2) optional in-canvas role labels for extra recognizability. (3) tune constants after user feedback (SCROLL_X, HOP_K/MIN/MAX, LANE_GAP, WINDOW_SEC, SLIDE_AMOUNT).
+## Current neural-to-race design
 
-## (SUPERSEDED) earlier R3F "ride" renderer notes — kept for history, code deleted
-RUN: `cd packages/web; npm run dev` -> open http://localhost:5173 (Vite; proxies /api -> :3001 server). Upload an AUDIO file (mp3/wav/flac/ogg), pick mode (stems/auto) + balls, Generate. When done, the "Live Visualizer" (Line Rider) appears with the audio player as the clock + a "Scene controls" panel. MIDI shows the baked <video> instead. Prod: `npm run build -w @motionscore/web` then `npm run start` (serves :3001).
-SCENE FILES: packages/web/src/client/src/components/ride/* (see below) + LiveScene.tsx (shell: Canvas+audio+RideControls) + RideControls.tsx (#8 controls) + RideScene.tsx (composition). Data via GET /api/result (choreography+full AudioAnalysis) + GET /api/audio (original file for <audio> clock). All visuals derive from audio.currentTime in useFrame (frame-accurate, seek-safe). RideControls -> App rideSettings state -> LiveScene -> RideScene settings (roleVisible chips, cameraIntensity, terrainAmp, "Note density"=inverted salienceGate, showCat); changing them live-updates the scene (RideScene useMemo rebuilds terrain/eventData, cheap). Settings persist across "New Video".
-TUNING KNOBS (if visuals need adjustment): sampling.ts constants (SCROLL 3.2, HOP_HEIGHT/DUR, CAM_LOOKAHEAD/Y_OFFSET, BASE_ZOOM 48, section-shape CLIMB/LAUNCH/DIP, FEATURE_ROLES/MELODIC_ROLES); settings.ts DEFAULT_RIDE_SETTINGS; per-component consts (Rider trail, Decorations parallax, SingingCat CAT_BASE, Background palettes). LiveScene <Canvas camera zoom:48>. If too busy/empty, adjust salienceGate default or SCROLL.
-FOLLOW-UPS (not blocking): baked MP4 still uses the OLD 2D node-canvas renderer (horizontal keys) — the R3F look is browser-only until/unless we add offscreen capture or a headless render of the scene. No dedicated vocal-energy channel (cat uses vocal hits + harmonicEnergy proxy). Bundle ~1.15MB (three) — could code-split. RideScene rebuilds terrain when ANY setting changes (even cameraIntensity) — could split memo deps.
+### Analysis
 
-## Real-time "Line Rider" renderer — original design/map notes (kept for reference)
-User-approved direction: rebuild the visual as a REAL-TIME Three.js/R3F renderer in the web app. Concept = LINE RIDER "the ride": time->horizontal scroll (x = t*SCROLL), a sled/rider travels left->right at constant speed, camera follows so the world scrolls; ground is a continuous track curve shaped by the music (bass/energy = hills; sectionCues build/drop/rise/fall = big terrain events); rhythmic roles (kick/snare/percussion/beats) create track features + make the rider hop/bounce ON the beat (sync-by-construction: feature placed at x(t_event), rider at x(currentTime), so they meet exactly). Melodic/bass/guitar/piano = decorations/parallax/color pulses. VOCAL role = a SEPARATE SINGING CAT character (screen-space or bobbing above sled), animated to vocal hits/energy, NOT part of the sled physics. Keep effects subtle/event-gated (do NOT reintroduce constant shake). node-canvas MP4 stays as interim baked export.
+- `stems` mode runs Demucs `htdemucs_6s` and emits discrete onsets for the eight canonical roles: `kick`, `snare`, `percussion`, `bass`, `melodic`, `piano`, `guitar`, and `vocal`.
+- Stem-presence gating removes near-silent separation bleed before either onsets or continuous signals are derived.
+- `AudioAnalysis.roleSignals` is an optional version-1 continuous neural payload. The stems extractor emits it at 10 Hz with one fixed-order track per role:
+  - `activityQ8`: activity quantized to integer `[0,255]`;
+  - `sustainSpans`: sorted `[startFrame,endFrame)` regions;
+  - pitched roles: `pitchDirection` (`-1|0|1`) and `pitchCoverageQ8`.
+- The Node boundary strictly validates version, 10 Hz frame rate, frame count, canonical role order, array lengths, Q8 bounds, span ordering, and pitched-role-only fields.
+- Raw analyzer events are stable-sorted and mapped one-to-one to `NoteEvent`s. The former TypeScript 90 ms thinning pass is gone. Exact co-timed events may share one physical contact later, but every source note ID remains represented.
+- In stems mode, the compact UI `roleActivity` summary is built from waveform activity; onset-binned activity remains the fallback for analyzers without `roleSignals`.
+- Web `auto` selects stems when the local Python probe finds Demucs with CUDA; otherwise it uses `smart`. CLI `auto` intentionally remains `smart` unless `--mode stems` is explicit.
 
-WEB APP MAP (from context-gatherer + reads): packages/web = Express server (src/server.ts -> dist/server.js) + standalone Vite/React client (src/client/, own build -> dist/client). React 19.1.0, Vite 6.3.5, @vitejs/plugin-react 4.5.2, TS 5.8.3, express 4.21.2, multer, nanoid. => need @react-three/fiber v9 (React19), @react-three/drei v10+, three r160+ (v8 is React18-only, won't work). Dev: `cd packages/web; npm run dev` (tsx watch server :3001 + vite client :5173, proxy /api->3001). Build: `npm run build` (build:client vite -> dist/client, build:server tsc -> dist/server.js). Client does NOT import @motionscore/types (has LOCAL wire-type copies in App.tsx + roleMeta.ts palette mirror). Server: POST /api/generate (multer) -> runs runPipeline in setImmediate -> SSE /api/progress/:id emits progress + 'complete'{stats,analysis(summary),videoUrl}; GET /api/video/:id serves MP4; uploaded audio at job.inputPath (tmp) NOT served + deleted after CLEANUP_TTL_MS=30min. App.tsx: all state + local types; complete handler L143-149 sets videoUrl/stats/analysis; panel-right mounts VideoPlayer+AnalysisPanel (mount site for LiveScene). PipelineResult (cli/pipeline.ts) had outputPath+stats+analysis?(summary) only; full Choreography (built ~L472) + full extraction.audioAnalysis were DISCARDED.
+### Deterministic 2D race planner
 
-DATA-FLOW PLAN: (done this step) pipeline.ts PipelineResult += `choreography: Choreography` + `audioAnalysis?: AudioAnalysis` (no new compute, stop discarding). server.ts: stash choreography+full analysis on Job; add GET /api/result/:jobId (JSON: choreography+full analysis+durationSec+audioUrl) and GET /api/audio/:jobId (stream job.inputPath, range-capable via sendFile, audio-only); complete event gains resultUrl+audioUrl. R3F model needs mainly the FULL AudioAnalysis (hits[time,role,salience,velocity], featureFrames energy, sectionCues, tempo) + audio URL; choreography optional for this renderer. Client (next): add three+@react-three/fiber v9; LiveScene = <Canvas> + <audio src=audioUrl> where audio.currentTime is the clock (useFrame samples it -> frame-accurate A/V sync). Real-time controls (per-role show/hide, density/salience gate, camera intensity, terrain amp) tune the LIVE scene instantly (no pipeline re-run).
+`packages/web/src/client/src/scene2d/model.ts` consumes the complete `AudioAnalysis` and builds semantically recognizable actors. The default grouping is three actors:
 
-## Known limitations
-- Role labels in librosa modes (smart/beats/onsets) = frequency-band heuristic; mislabels acoustic/piano (onsets real, names wrong). FIXED for `--mode stems` (Demucs source separation -> real instrument roles). Heuristic still applies to the librosa modes only.
-- Cue detection is heuristic energy/bass trends, not semantic structure.
-- PNG `render()` fallback (render.ts) is single-ball only (tests); production streaming path is multi-ball.
+- `rhythm`: kick + snare + percussion;
+- `bass`: bass;
+- `lead`: melodic + piano + guitar + vocal.
 
-## Verify / commands
-- Build: `npx tsc -b`  | Web: `npm run web:build`  | Tests: set `PYTHON` then `npx vitest run` (currently 110 pass / 17 files).
-- venv Python: `.venv/Scripts/python.exe` (set `$env:PYTHON`). Analyzer: `packages/note-extractor/python/extract_events.py <audio> <out.json> smart|beats|onsets`.
-- User test files in `C:\Users\Basel Ashraf\Downloads` (mp3 + Birthday-1.mid). No need to full-render (slow); analyze directly.
+This default is overridable: `settings.actorGroups` can define any grouping from one ball per role (up to eight) to a single ball fed by all roles. Only groups with enabled notes or signal activity exist. The planner preserves every enabled hit, merging only exactly co-timed notes within one group into one contact with multiple `noteIds`.
 
-## Next steps (in order)
-1. Ball show/hide (pre-render role filter): after analysis, show role chips (reuse ROLE_COLORS/LABELS + roleActivity) and let user include/exclude roles; pass selected roles to `planVoices` (filter targets) via a new pipeline/CLI/web option. Achievable now; gives "how many balls" control without the live renderer.
-2. Stems density tuning + a UI "sensitivity" slider: raw onset count is high. Map slider -> `ROLE_DELTA`/`ROLE_MIN_GAP` (stems) or `maxNotesPerSecond` (mapper). Validate ball counts stay musical per-role.
-3. Phase 3 fidelity (librosa modes): voice-aware merging in analyzer (merge WITHIN a role, KEEP simultaneous cross-role hits); per-role lane/collision tuning.
-4. 3D / interactive renderer ("Pulse Rail" / tap-game tower-bounce): Three.js/R3F, optional @remotion/three, on the `voices[]` model. Enables TRUE real-time ball show/hide + camera driven by section cues. Keep 2D path as fallback.
-5. Further neural upgrades (opt-in, future, feed SAME NoteEvent/SectionCue contracts -> no downstream change): madmom neural drum/beat onsets; Essentia/MSAF structural segmentation for cues; consider Roformer / `python-audio-separator` or DrumSep/LarsNet for even cleaner stems.
-   - DONE: Demucs `htdemucs_6s` stems -> real per-instrument voices (`--mode stems`), fixes role labels.
+The music fixes where each actor must be at each timestamp; motion is then solved backward to justify those targets:
+
+- horizontal progress is monotonic (`SCROLL_X = 6`) with a small actor-specific race bias;
+- anchors descend through the world (`DRIFT_Y = 0.72`);
+- unsupported intervals are exact constant-gravity ballistic segments (`GRAVITY = 18`, `BALL_R = 0.23`);
+- neural sustain spans become supported cubic rails, with pitch direction influencing slope;
+- rapid onsets become compact descending steps instead of deleting events;
+- rests end the track and leave the actor in freefall;
+- the strongest shared musical moment in each phrase drives deterministic convergence/crossover shaping;
+- contact tangent/normal comes from sampled incoming/outgoing velocity, so hit lines physically explain the collision;
+- static X bias plus deterministic separation adjustment prevents accidental ball overlap while retaining intentional visual crossings.
+
+### Rendering and camera
+
+- `scene2d/render.ts` draws near-white paper, black physical contacts/rails/supports, then solid actors. There are no lane baselines, labels, detached rings, waveform paths, particles, terrain, or screen shake.
+- Impact squash and the seam are sampled at the actual ball/contact point; they cannot remain behind when a ball jumps.
+- Contacts reveal near their event and fade behind (`0.10 s` preview, `0.58 s` trail). Sustained rails expose only `0.90 s` ahead and `0.48 s` behind, avoiding a viewport-wide visualizer thicket without dropping any event.
+- The camera follows the actor pack and fit-zooms to a TRIMMED vertical band (percentile `[trim,1-trim]`, `trim=clamp(0.5/actorCount,0.03,0.12)`) so transient tall jumps / deep free-falls leave frame instead of zooming everyone out, while persistently offset balls stay framed. Hard backstops: spread cap `BALL_R*12+actorCount*3.2` and min scale `8`. Fixes the "one ball per sound zooms out so far you can't see anything" bug (verified: 8 balls + a ball leaving the pack keeps scale ~20–35, ball ≥4.5px, smooth). Seeking resets the camera so the next frame snaps.
+- `Ctx2D` is deliberately limited to APIs shared by browser Canvas and `@napi-rs/canvas`. The race renderer is therefore export-compatible, but it is not yet wired into the legacy Node MP4 exporter.
+
+### Web/runtime integration
+
+- Audio analysis is returned through `/api/result/:jobId`; the original audio is the `<audio>` clock, so live frames are deterministic functions of `currentTime` and remain seek-safe.
+- The Express server lazy-loads heavy CLI/native dependencies so it binds quickly.
+- Audio jobs skip the old MP4 renderer and show the live race after analysis. MIDI and legacy explicit export still use the existing mapper/trajectory/node-canvas path.
+- Actor grouping is user-configurable via `settings.actorGroups` (default rhythm/bass/lead). The controls let the user show/hide each ball, edit which stems feed each ball (add/remove/rename/recolor balls, one role per ball), and reset to default. There is no hidden actor-count or hit-count cap.
+- Each ball also has manual `actorOverrides[id] = { yOffset, rotationDeg }`. Rotation is implemented as a vertical shear (`y += yOffset + tan(deg)*(x - pivotX)`, x untouched) so the time->x mapping, camera framing, and x-based culling stay valid; a true world rotation was rejected for coupling into x and risking non-monotonic x. Overrides run after planning/convergence, then `enforceRhythmHops` re-clamps so a downward tilt can never re-introduce a rhythm sag.
+- Settings persist across "New Video". A persisted custom grouping that references only roles absent in a new song yields an empty scene; the overlay and the editor's "Reset to default" recover it.
+
+## Real-song validation
+
+Validated on `music/01 - Gary Moore - Still Got The Blues.mp3` with real CUDA stems analysis:
+
+- mode: `stems`;
+- duration: `250.96 s`;
+- source hits: `5,900`;
+- role-signal frames: `2,510`;
+- role counts: guitar 816, bass 958, kick 1,172, snare 642, percussion 631, melodic 1,007, vocal 674.
+
+Required windows were inspected from direct Canvas PNG renders:
+
+- `00:00–03`: all `37/37` source hits represented;
+- `00:18–22`: all `62/62` source hits represented.
+
+Full-song sampled geometry checks:
+
+- represented hits: `5,900/5,900`;
+- maximum contact-center error: `2.842170943040401e-14`;
+- maximum surface-radius error: `9.894862706971708e-14`;
+- minimum actor distance: `0.6800000100096066`, above the required `0.46` separation.
+
+### Independent visual + song-following audit (subagents)
+
+Two read-only audits confirmed the renderer and the song-following behavior against real neural output:
+
+- Rendering (synthetic mix): finite positions/velocities everywhere; contact-center and surface-radius errors ~1e-14; zero sagging rhythm ballistic segments; exact C0 segment joints; camera scale within `[5,220]` and smooth (max per-frame Δscale ~0.72); rails gated to `TRACK_BEHIND_SEC`/`TRACK_AHEAD_SEC` so none float detached; contacts fade via `temporalContactAlpha`; no detached rings/struts/zero-length lines.
+- Song-following (real Gary Moore 0–40 s, Demucs `htdemucs_6s` on CUDA, 872 onsets across 7 roles, `roleSignals` present): `872/872` represented; "lands on the beat" max error ~1.5e-15; monotonic time→x; every slide rail lies inside a neural sustain span (bass 150/150, lead 320/320); rhythm makes zero slides. Windows `00:00–03` and `00:18–22`: all source hits represented and all actors actively moving.
+- Robustness on non-Gary synthetic songs (sparse solo piano, dense electronic with drops, vocal-only): all finite, fully represented, correct sustain rails.
+- Soft finding (by design, not a defect): rail slope follows `pitchDirection` ~70% of the time because `buildSegments` weights geometric slope between music-fixed anchors (0.68) above the pitch lean (0.32); pitch is a soft bias, not a strict contour map.
+- Fixture note: the committed `.stems-seg-test.json` is a piano-only slice without `roleSignals`; anything using it falls back to the legacy section-cue support path.
+
+## Validation commands
+
+Run from the repository root in PowerShell:
+
+```powershell
+npx tsc -b
+npx tsc -p packages/web/tsconfig.json
+$env:PYTHON=".\.venv\Scripts\python.exe"; npx vitest run
+npm run build -w @motionscore/web
+.\.venv\Scripts\python.exe -m py_compile packages/note-extractor/python/extract_events.py packages/note-extractor/python/extract_stems.py
+git diff --check
+```
+
+For a fresh Gary Moore evidence run, temporary scripts/snapshots can recreate the stems payload, PNGs, and exhaustive geometry checks, but `.tmp-snapshots/` is not a permanent project directory.
+
+## Known limitations / next work
+
+1. Wire `scene2d` into the Node exporter so a downloadable MP4 exactly matches the live race. The shared drawing interface already supports this; the integration is not done.
+2. Heuristic `smart`/`beats`/`onsets` role names remain frequency-band estimates. Use `stems` for instrument identity.
+3. Section cues are heuristic structural hints; the current race uses neural contacts/activity as primary truth and tolerates noisy cue overlap.
+4. Tune physical/framing magnitudes only after viewing more songs. Do not reintroduce event thinning or count caps as a visual cleanup shortcut.
+
+## Superseded designs
+
+The following approaches were implemented during exploration and are no longer current:
+
+- the React Three Fiber/Three.js ride, terrain, cat, parallax, and audio-reactive camera;
+- one fixed lane/ball for every active role;
+- continuous 190 ms impulse envelopes where balls moved around lane baselines;
+- always-visible colored trajectory/waveform paths;
+- detached impact rings, canvas labels, baseline flashes, and effects-only “juice”;
+- section-cue slides that suppressed real onsets;
+- TypeScript role-aware 90 ms hit thinning;
+- full-viewport future rails/contact geometry.
+
+Do not restore these to solve readability. The accepted model is target-first physical choreography: music fixes the contacts and supports, then gravity/rails explain how a small number of actors reach them.
 
 ## Key files
-- `packages/note-extractor/python/extract_events.py` — analysis + cues.
-- `packages/note-extractor/src/audio-events.ts` — subprocess + validation + contract conversion.
-- `packages/musical-mapper/src/index.ts` — mapNotes + planVoices.
-- `packages/trajectory-solver/src/choreography.ts` — solveChoreography.
-- `packages/renderer/src/stream-render.ts` — renderAndEncodeVoices (multi-ball).
-- `packages/cli/src/pipeline.ts` — orchestration.
-- `packages/types/src/{data-contracts,validators,config}.ts` — contracts + shared role metadata (`ROLE_ORDER`/`ROLE_COLORS`/`ROLE_LABELS`/`ROLE_ACTIVITY_BINS`).
-- `packages/note-extractor/python/extract_stems.py` — Demucs stems analyzer (`--mode stems`).
-- `packages/web/src/client/src/roleMeta.ts` — client mirror of role palette; `components/AnalysisPanel.tsx` — "Instruments over time" viz.
-- Docs: `AUDIO_ANALYSIS.md`, `MULTI_BALL_PLAN.md`, `ARCHITECTURE.md`.
+
+- `packages/note-extractor/python/extract_events.py` — lightweight analysis, features, cues.
+- `packages/note-extractor/python/extract_stems.py` — Demucs separation, onsets, waveform `roleSignals`.
+- `packages/note-extractor/src/audio-events.ts` — subprocess routing, strict payload validation, one-to-one event conversion.
+- `packages/types/src/data-contracts.ts` — shared analysis contracts and role metadata.
+- `packages/cli/src/pipeline.ts` — orchestration and analysis summary.
+- `packages/web/src/client/src/scene2d/model.ts` — configurable actor grouping, deterministic physical planner, `applyActorOverride` (shear + offset).
+- `packages/web/src/client/src/scene2d/render.ts` — physical geometry, actors, and centroid camera.
+- `packages/web/src/client/src/scene2d/settings.ts` — `Scene2DSettings` (roleVisible, actorGroups, actorOverrides), defaults, merge/override helpers.
+- `packages/web/src/client/src/scene2d/{types,index}.ts` — shared Canvas contract and public API.
+- `packages/web/src/client/src/components/LiveScene.tsx` — audio-clocked Canvas loop.
+- `packages/web/src/client/src/components/RideControls.tsx` — ball show/hide, per-actor y-offset/rotation sliders, grouping editor.
+- `packages/renderer/src/stream-render.ts` — legacy baked MP4 renderer, not yet the race scene.
+- `docs/AUDIO_ANALYSIS.md` — detailed Stage B reference.
+- `docs/ARCHITECTURE.md` — current end-to-end architecture and invariants.

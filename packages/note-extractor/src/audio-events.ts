@@ -12,13 +12,18 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  ROLE_ORDER,
   TranscriptionError,
   type AudioAnalysis,
   type AudioAnalysisMode,
   type AudioFeatureFrame,
   type HitRole,
   type NoteEvent,
+  type PitchDirection,
+  type RoleSignalTrack,
+  type RoleSignals,
   type SectionCue,
+  type SustainSpan,
 } from '@motionscore/types';
 
 /** Strategies implemented by the librosa helper. */
@@ -32,10 +37,67 @@ const SCRIPT_PATH = fileURLToPath(new URL('../python/extract_events.py', import.
 /** Neural per-instrument analyzer (Demucs stems); used only for `stems` mode. */
 const STEMS_SCRIPT_PATH = fileURLToPath(new URL('../python/extract_stems.py', import.meta.url));
 const EVENT_DURATION_SEC = 0.12;
-const MIN_EVENT_GAP_SEC = 0.09;
 const NOTE_ID_DIGITS = 4;
 /** Safety bound for a hung decoder/analyzer subprocess. */
 const ANALYZER_TIMEOUT_MS = 15 * 60 * 1000;
+
+/**
+ * Whether neural stems analysis can run on a GPU here: torch + demucs importable
+ * AND CUDA available. Probed once and cached. Lets callers prefer `stems`
+ * automatically when it will be fast, without forcing slow CPU separation on
+ * machines that lack a GPU (or the deps). Never throws — resolves false on any
+ * problem.
+ */
+let stemsGpuProbe: Promise<boolean> | undefined;
+
+export function detectStemsGpuAvailable(): Promise<boolean> {
+  if (stemsGpuProbe === undefined) stemsGpuProbe = probeStemsGpu();
+  return stemsGpuProbe;
+}
+
+function probeStemsGpu(): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const python = process.env[PYTHON_ENV_VAR] ?? DEFAULT_PYTHON;
+    let settled = false;
+    const done = (value: boolean): void => {
+      if (!settled) {
+        settled = true;
+        resolve(value);
+      }
+    };
+    let child;
+    try {
+      child = spawn(
+        python,
+        ['-c', 'import torch,demucs;print(1 if torch.cuda.is_available() else 0)'],
+        { shell: false, env: { ...process.env, PYTHONIOENCODING: 'utf-8' } },
+      );
+    } catch {
+      done(false);
+      return;
+    }
+    let out = '';
+    const timer = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+        /* ignore */
+      }
+      done(false);
+    }, 20_000);
+    child.stdout?.on('data', (chunk: Buffer) => {
+      out += chunk.toString();
+    });
+    child.on('error', () => {
+      clearTimeout(timer);
+      done(false);
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      done(code === 0 && out.trim().startsWith('1'));
+    });
+  });
+}
 
 const HIT_ROLES: ReadonlySet<string> = new Set([
   'kick',
@@ -46,6 +108,13 @@ const HIT_ROLES: ReadonlySet<string> = new Set([
   'vocal',
   'piano',
   'guitar',
+]);
+const PITCHED_SIGNAL_ROLES: ReadonlySet<HitRole> = new Set([
+  'bass',
+  'melodic',
+  'piano',
+  'guitar',
+  'vocal',
 ]);
 const SECTION_CUE_TYPES: ReadonlySet<string> = new Set([
   'build',
@@ -102,6 +171,7 @@ interface RawExtractionResult {
   events: RawEvent[];
   featureFrames: RawFeatureFrame[];
   sectionCues: RawSectionCue[];
+  roleSignals?: RoleSignals;
 }
 
 /**
@@ -120,7 +190,7 @@ export async function analyzeAudioEvents(
     await runExtractor(python, audioPath, outJson, mode);
     const rawJson = await readFile(outJson, 'utf8');
     const result = parseExtractionResult(JSON.parse(rawJson) as unknown, audioPath, mode);
-    return {
+    const analysis: AudioAnalysis = {
       version: 1,
       durationSec: result.durationSec,
       tempoBpm: result.tempo,
@@ -129,6 +199,8 @@ export async function analyzeAudioEvents(
       featureFrames: buildFeatureFrames(result.featureFrames),
       sectionCues: buildSectionCues(result.sectionCues),
     };
+    if (result.roleSignals !== undefined) analysis.roleSignals = result.roleSignals;
+    return analysis;
   } catch (cause) {
     if (cause instanceof TranscriptionError) throw cause;
     const detail = cause instanceof Error ? cause.message : String(cause);
@@ -334,7 +406,12 @@ function parseExtractionResult(
     return cue;
   });
 
-  return {
+  const roleSignals = parseRoleSignals(
+    root['roleSignals'],
+    audioPath,
+    featureFrames.length,
+  );
+  const result: RawExtractionResult = {
     version: 1,
     durationSec,
     tempo,
@@ -343,6 +420,145 @@ function parseExtractionResult(
     featureFrames,
     sectionCues,
   };
+  if (roleSignals !== undefined) result.roleSignals = roleSignals;
+  return result;
+}
+
+function parseRoleSignals(
+  value: unknown,
+  audioPath: string,
+  expectedFrameCount: number,
+): RoleSignals | undefined {
+  if (value === undefined) return undefined;
+  const root = requireRecord(value, audioPath, 'roleSignals');
+  if (root['version'] !== 1) invalidOutput(audioPath, 'roleSignals.version', root['version']);
+  const frameRateHz = requireNumber(root, 'frameRateHz', audioPath, 10, 10, 'roleSignals');
+  const frameCount = requireInteger(root, 'frameCount', audioPath, 0, 'roleSignals');
+  if (frameCount !== expectedFrameCount) {
+    invalidOutput(audioPath, 'roleSignals.frameCount', frameCount);
+  }
+
+  const rawTracks = requireArray(root, 'tracks', audioPath);
+  if (rawTracks.length !== ROLE_ORDER.length) {
+    invalidOutput(audioPath, 'roleSignals.tracks.length', rawTracks.length);
+  }
+  const tracks = rawTracks.map((item, index): RoleSignalTrack => {
+    const path = `roleSignals.tracks[${index}]`;
+    const record = requireRecord(item, audioPath, path);
+    const expectedRole = ROLE_ORDER[index]!;
+    if (record['role'] !== expectedRole) {
+      invalidOutput(audioPath, `${path}.role`, record['role']);
+    }
+    const activityQ8 = requireBoundedIntegerArray(
+      record,
+      'activityQ8',
+      audioPath,
+      path,
+      frameCount,
+      0,
+      255,
+    );
+    const rawSpans = requireArray(record, 'sustainSpans', audioPath);
+    let previousEnd = -1;
+    const sustainSpans = rawSpans.map((spanValue, spanIndex): SustainSpan => {
+      const spanPath = `${path}.sustainSpans[${spanIndex}]`;
+      if (!Array.isArray(spanValue) || spanValue.length !== 2) {
+        invalidOutput(audioPath, spanPath, spanValue);
+      }
+      const start = spanValue[0];
+      const end = spanValue[1];
+      if (
+        !Number.isInteger(start) ||
+        !Number.isInteger(end) ||
+        (start as number) < 0 ||
+        (end as number) <= (start as number) ||
+        (end as number) > frameCount ||
+        (start as number) <= previousEnd
+      ) {
+        invalidOutput(audioPath, spanPath, spanValue);
+      }
+      previousEnd = end as number;
+      return [start as number, end as number];
+    });
+
+    const track: RoleSignalTrack = {
+      role: expectedRole,
+      activityQ8,
+      sustainSpans,
+    };
+    const rawDirection = record['pitchDirection'];
+    if (rawDirection !== undefined) {
+      if (!PITCHED_SIGNAL_ROLES.has(expectedRole)) {
+        invalidOutput(audioPath, `${path}.pitchDirection`, rawDirection);
+      }
+      const directions = requireBoundedIntegerArray(
+        record,
+        'pitchDirection',
+        audioPath,
+        path,
+        frameCount,
+        -1,
+        1,
+      );
+      if (directions.some((direction) => direction !== -1 && direction !== 0 && direction !== 1)) {
+        invalidOutput(audioPath, `${path}.pitchDirection`, rawDirection);
+      }
+      track.pitchDirection = directions as PitchDirection[];
+    }
+    const rawCoverage = record['pitchCoverageQ8'];
+    if (rawCoverage !== undefined) {
+      if (!PITCHED_SIGNAL_ROLES.has(expectedRole)) {
+        invalidOutput(audioPath, `${path}.pitchCoverageQ8`, rawCoverage);
+      }
+      track.pitchCoverageQ8 = requireInteger(
+        record,
+        'pitchCoverageQ8',
+        audioPath,
+        0,
+        path,
+        255,
+      );
+    }
+    return track;
+  });
+
+  return { version: 1, frameRateHz, frameCount, tracks };
+}
+
+function requireInteger(
+  record: Record<string, unknown>,
+  key: string,
+  audioPath: string,
+  minimum: number,
+  parentPath: string,
+  maximum = Number.POSITIVE_INFINITY,
+): number {
+  const value = record[key];
+  if (!Number.isInteger(value) || (value as number) < minimum || (value as number) > maximum) {
+    invalidOutput(audioPath, `${parentPath}.${key}`, value);
+  }
+  return value as number;
+}
+
+function requireBoundedIntegerArray(
+  record: Record<string, unknown>,
+  key: string,
+  audioPath: string,
+  parentPath: string,
+  expectedLength: number,
+  minimum: number,
+  maximum: number,
+): number[] {
+  const values = requireArray(record, key, audioPath);
+  if (
+    values.length !== expectedLength ||
+    values.some(
+      (value) => !Number.isInteger(value) || (value as number) < minimum || (value as number) > maximum,
+    )
+  ) {
+    invalidOutput(audioPath, `${parentPath}.${key}`, values);
+  }
+  return values as number[];
 }
 
 function requireRecord(
@@ -410,9 +626,8 @@ function invalidOutput(audioPath: string, path: string, value: unknown): never {
 }
 
 /**
- * Normalize raw analyzer events and keep the stronger event when two hits are
- * too close for the trajectory solver. Smart mode normally performs this in
- * Python; retaining the guard here protects every analyzer mode and schema.
+ * Normalize raw analyzer events without renderer-side thinning. The Python
+ * analyzer owns onset resolution; every returned timestamp becomes one note.
  */
 function buildNoteEvents(rawEvents: readonly RawEvent[]): NoteEvent[] {
   const sorted = rawEvents
@@ -420,32 +635,7 @@ function buildNoteEvents(rawEvents: readonly RawEvent[]): NoteEvent[] {
     .slice()
     .sort((a, b) => a.timeSec - b.timeSec);
 
-  // Thin PER ROLE: a single instrument (ball) cannot re-strike within the gap,
-  // but different roles may hit simultaneously (they are different balls). This
-  // preserves e.g. a piano onset that coincides with a kick. `smart` mode has
-  // already merged across roles in Python, so this is a near no-op there; for
-  // `stems` mode it keeps each instrument's independent hits.
-  const selected: RawEvent[] = [];
-  const lastIndexByRole = new Map<string, number>();
-  for (const event of sorted) {
-    const roleKey = event.role ?? '__none__';
-    const lastIndex = lastIndexByRole.get(roleKey);
-    if (
-      lastIndex !== undefined &&
-      event.timeSec - selected[lastIndex]!.timeSec < MIN_EVENT_GAP_SEC
-    ) {
-      if (eventPriority(event) > eventPriority(selected[lastIndex]!)) {
-        selected[lastIndex] = event;
-      }
-      continue;
-    }
-    selected.push(event);
-    lastIndexByRole.set(roleKey, selected.length - 1);
-  }
-  // Replacements above can perturb ordering; restore global time order.
-  selected.sort((a, b) => a.timeSec - b.timeSec);
-
-  return selected.map((event, index) => {
+  return sorted.map((event, index) => {
     const note: NoteEvent = {
       id: `n${String(index + 1).padStart(NOTE_ID_DIGITS, '0')}`,
       pitchMidi: clampPitch(event.pitchMidi),
@@ -510,11 +700,6 @@ function buildSectionCues(rawCues: readonly RawSectionCue[]): SectionCue[] {
     cues.push(cue);
   }
   return cues.sort((a, b) => a.startSec - b.startSec || a.type.localeCompare(b.type));
-}
-
-function eventPriority(event: RawEvent): number {
-  if (Number.isFinite(event.salience)) return event.salience as number;
-  return Number.isFinite(event.velocity) ? event.velocity : 0;
 }
 
 function isAnalysisMode(value: string): value is AudioAnalysisMode {

@@ -31,7 +31,6 @@ HOP_LENGTH = 512
 FEATURE_RATE_HZ = 10.0
 MERGE_WINDOW_SEC = 0.095
 MIN_HIT_GAP_SEC = 0.09
-MAX_HITS_PER_SECOND = 8
 # Full-song HPSS still requires spectrogram-sized working memory. Reject very
 # long uploads before decoding/allocating matrices; longer mixes should be
 # split into sections or handled by a future chunked analyzer.
@@ -367,19 +366,11 @@ def _merge_candidates(candidates: list[Candidate]) -> list[Candidate]:
             continue
         spaced.append(candidate)
 
-    # Fixed one-second salience cap is a final safety valve for unusually noisy
-    # material. Typical songs remain below it after merge/repetition suppression.
-    buckets: dict[int, list[Candidate]] = {}
-    for candidate in spaced:
-        buckets.setdefault(int(candidate.time_sec), []).append(candidate)
-    capped: list[Candidate] = []
-    for bucket in buckets.values():
-        capped.extend(
-            sorted(bucket, key=lambda item: item.rank, reverse=True)[
-                :MAX_HITS_PER_SECOND
-            ]
-        )
-    return sorted(capped, key=lambda item: item.time_sec)
+    # No fixed per-second cap: density is already bounded by the perceptual merge
+    # window and MIN_HIT_GAP_SEC (a single ball physically cannot re-strike
+    # faster). Letting the rest through avoids arbitrarily deleting audible hits
+    # during genuinely busy passages.
+    return sorted(spaced, key=lambda item: item.time_sec)
 
 
 def _candidate_pitch(candidate: Candidate, centroid_hz, previous_pitch: float, previous_time: float) -> float:

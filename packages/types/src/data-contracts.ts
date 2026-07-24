@@ -125,6 +125,36 @@ export interface AudioFeatureFrame {
   percussiveEnergy: number;
 }
 
+/** Coarse local register motion for a pitched neural stem. */
+export type PitchDirection = -1 | 0 | 1;
+
+/** Inclusive start frame and exclusive end frame in a role-signal timeline. */
+export type SustainSpan = [startFrame: number, endFrame: number];
+
+/**
+ * Compact continuous signal for one neural role. Activity is Q8 so a full song
+ * can travel through the result API without an object for every role/frame.
+ */
+export interface RoleSignalTrack {
+  role: HitRole;
+  /** Per-frame activity, quantized from [0,1] to integer [0,255]. */
+  activityQ8: number[];
+  /** Sorted non-overlapping active regions on the shared frame grid. */
+  sustainSpans: SustainSpan[];
+  /** Rising/falling/level register motion; present for pitched roles only. */
+  pitchDirection?: PitchDirection[];
+  /** Fraction of active frames with a usable pitch estimate, in Q8. */
+  pitchCoverageQ8?: number;
+}
+
+/** Per-role neural timelines aligned on one fixed-rate frame grid. */
+export interface RoleSignals {
+  version: 1;
+  frameRateHz: number;
+  frameCount: number;
+  tracks: RoleSignalTrack[];
+}
+
 /** Structural scene cue inferred from a longer musical trend or transition. */
 export interface SectionCue {
   type: 'build' | 'drop' | 'breakdown' | 'rise' | 'fall';
@@ -144,6 +174,8 @@ export interface AudioAnalysis {
   hits: NoteEvent[];
   featureFrames: AudioFeatureFrame[];
   sectionCues: SectionCue[];
+  /** Neural per-role activity/register timelines; present in stems mode. */
+  roleSignals?: RoleSignals;
 }
 
 /** One downsampled point of the continuous energy timeline, for UI display. */

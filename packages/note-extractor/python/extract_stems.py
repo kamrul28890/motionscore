@@ -4,15 +4,13 @@
 Usage:
     python extract_stems.py <audio_path> <output_json> [mode]
 
-Separates the mix into real instrument stems with Demucs (``htdemucs_6s``:
-drums, bass, other, vocals, guitar, piano), detects onsets *per stem*, and tags
-each hit with a real instrument role. Because the stems are isolated, a piano
-onset is labelled ``piano`` (not guessed from a frequency band), so a per-role
-ball can follow the actual piano.
+Separates the mix into real instrument stems with Demucs (``htdemucs_6s``),
+detects onsets per stem, and emits compact continuous activity/register signals
+for every visual role. Discrete onset timestamps and continuous signals are kept
+separate: impacts stay sample-locked while held audio can drive physical slides.
 
-Continuous features and section cues are computed from the full mix by reusing
-``extract_events.py``, so the JSON schema is identical to the librosa analyzer
-(``mode="stems"``). Requires PyTorch + Demucs in addition to librosa.
+Full-mix features and section cues reuse ``extract_events.py``. Requires
+PyTorch + Demucs in addition to librosa.
 """
 
 from __future__ import annotations
@@ -28,6 +26,17 @@ import extract_events as ee  # noqa: E402
 
 MODEL_NAME = "htdemucs_6s"
 ANALYSIS_SR = ee.SAMPLE_RATE  # 22.05 kHz for onset/feature analysis
+ROLE_SIGNAL_HZ = ee.FEATURE_RATE_HZ
+ROLE_ORDER = (
+    "kick",
+    "snare",
+    "percussion",
+    "bass",
+    "melodic",
+    "piano",
+    "guitar",
+    "vocal",
+)
 
 # Demucs (non-drum) stem name -> our role. Drums is split separately below.
 STEM_ROLE = {
@@ -49,18 +58,248 @@ ROLE_DELTA = {
     "guitar": 0.07,
     "melodic": 0.08,
 }
-# A single instrument cannot re-strike faster than this (seconds).
+# A single detector cannot resolve two independent attacks inside this window.
+# This belongs to onset detection, not renderer-side event dropping.
 ROLE_MIN_GAP = 0.09
-# Roles whose ball x should follow pitch (via spectral centroid), not a lane base.
 PITCHED_ROLES = {"bass", "piano", "guitar", "melodic", "vocal"}
 
-# A stem must carry at least this fraction of the loudest stem's RMS to count as
-# "present". Quieter stems are Demucs separation bleed (e.g. the faint drums a
-# solo-piano track leaks into), so we skip them entirely -- otherwise an isolated
-# instrument spawns phantom hits in every role because each stem's onset envelope
-# is normalized independently. Full-band mixes keep every stem (all are loud).
+# A stem must carry enough of the separated mix to count as present. This rejects
+# Demucs bleed before each stem is independently normalized.
 STEM_PRESENCE_REL = 0.12
 STEM_PRESENCE_ABS = 5e-4
+
+# Continuous-signal shaping. These do not remove discrete onset events.
+SIGNAL_ATTACK_SEC = 0.05
+SIGNAL_RELEASE_SEC = 0.25
+SUSTAIN_ON = 0.30
+SUSTAIN_OFF = 0.18
+PITCH_ENTER_SEMITONES_PER_SEC = 1.0
+PITCH_EXIT_SEMITONES_PER_SEC = 0.4
+
+
+def _signal_times(duration, np):
+    """Canonical fixed-rate timeline shared with full-mix feature frames."""
+    if duration <= 0.0:
+        return np.asarray([], dtype=float)
+    times = np.arange(
+        0.0,
+        duration + 0.5 / ROLE_SIGNAL_HZ,
+        1.0 / ROLE_SIGNAL_HZ,
+        dtype=float,
+    )
+    return times[times <= duration + 1e-9]
+
+
+def _smooth_energy(values, hop_sec, np):
+    """Causal fast-attack/slow-release smoothing in linear amplitude space."""
+    source = np.asarray(values, dtype=float)
+    if source.size == 0:
+        return source
+    output = np.empty_like(source)
+    output[0] = max(0.0, float(source[0]))
+    for index in range(1, source.size):
+        value = max(0.0, float(source[index]))
+        tau = SIGNAL_ATTACK_SEC if value >= output[index - 1] else SIGNAL_RELEASE_SEC
+        alpha = 1.0 - np.exp(-hop_sec / tau)
+        output[index] = output[index - 1] + alpha * (value - output[index - 1])
+    return output
+
+
+def _normalized_activity(energy, native_times, output_times, np):
+    """Robust role-local activity, sampled on the canonical output timeline."""
+    if output_times.size == 0:
+        return np.asarray([], dtype=float)
+    values = np.asarray(energy, dtype=float)
+    if values.size == 0 or not np.any(np.isfinite(values)):
+        return np.zeros(output_times.size, dtype=float)
+    values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
+    if float(np.max(values)) <= 1e-10:
+        return np.zeros(output_times.size, dtype=float)
+
+    smoothed = _smooth_energy(values, ee.HOP_LENGTH / ANALYSIS_SR, np)
+    db = 20.0 * np.log10(np.maximum(smoothed, 1e-10))
+    peak_db = float(np.percentile(db, 95.0))
+    noise_db = float(np.percentile(db, 20.0))
+    floor_db = max(peak_db - 60.0, min(noise_db, peak_db - 12.0))
+    span_db = peak_db - floor_db
+    if not np.isfinite(span_db) or span_db <= 1e-6:
+        native = np.clip(smoothed / max(float(np.max(smoothed)), 1e-10), 0.0, 1.0)
+    else:
+        native = np.clip((db - floor_db) / span_db, 0.0, 1.0)
+    return np.clip(np.interp(output_times, native_times, native), 0.0, 1.0)
+
+
+def _sustain_spans(activity):
+    """Schmitt-trigger spans; a one-frame dip is bridged, no span-count cap."""
+    spans = []
+    active = False
+    start = 0
+    low_run = 0
+    for index, value in enumerate(activity):
+        if not active:
+            if float(value) >= SUSTAIN_ON:
+                active = True
+                start = index
+                low_run = 0
+            continue
+        if float(value) <= SUSTAIN_OFF:
+            low_run += 1
+            if low_run >= 2:
+                end = index - 1  # first low frame; exclusive
+                spans.append([start, max(start + 1, end)])
+                active = False
+                low_run = 0
+        else:
+            low_run = 0
+    if active:
+        spans.append([start, len(activity)])
+    return spans
+
+
+def _median3(values, np):
+    if values.size < 2:
+        return values.copy()
+    output = values.copy()
+    for index in range(values.size):
+        lo = max(0, index - 1)
+        hi = min(values.size, index + 2)
+        output[index] = float(np.median(values[lo:hi]))
+    return output
+
+
+def _pitch_directions(spectrum, sr, native_times, output_times, activity, spans, np, librosa):
+    """Estimate coarse register motion, not note transcription or melody F0."""
+    if output_times.size == 0 or spectrum.size == 0:
+        return [0] * int(output_times.size), 0
+
+    magnitudes = np.asarray(spectrum, dtype=float)
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=ee.N_FFT)
+    weight = np.sum(magnitudes, axis=0)
+    centroid = np.sum(magnitudes * freqs[:, None], axis=0) / np.maximum(weight, 1e-10)
+    valid_native = (weight > 1e-9) & np.isfinite(centroid) & (centroid > 0.0)
+    midi = 69.0 + 12.0 * np.log2(np.maximum(centroid, 1e-6) / 440.0)
+    midi = np.clip(midi, 21.0, 108.0)
+    sampled = _median3(np.interp(output_times, native_times, midi), np)
+    valid_sampled = np.interp(
+        output_times, native_times, valid_native.astype(float)
+    ) >= 0.5
+    active_frames = np.asarray(activity) >= SUSTAIN_ON
+    usable = valid_sampled & active_frames
+    active_count = int(np.count_nonzero(active_frames))
+    coverage = (
+        int(np.floor(255.0 * np.count_nonzero(usable) / active_count + 0.5))
+        if active_count > 0
+        else 0
+    )
+
+    directions = np.zeros(output_times.size, dtype=np.int8)
+    for start, end in spans:
+        state = 0
+        for index in range(start, end):
+            left = max(start, index - 2)
+            right = min(end - 1, index + 2)
+            elapsed = float(output_times[right] - output_times[left])
+            if elapsed <= 0.0 or not usable[index]:
+                directions[index] = 0
+                continue
+            slope = float(sampled[right] - sampled[left]) / elapsed
+            if state == 0:
+                if slope >= PITCH_ENTER_SEMITONES_PER_SEC:
+                    state = 1
+                elif slope <= -PITCH_ENTER_SEMITONES_PER_SEC:
+                    state = -1
+            elif state > 0:
+                if slope <= -PITCH_ENTER_SEMITONES_PER_SEC:
+                    state = -1
+                elif slope < PITCH_EXIT_SEMITONES_PER_SEC:
+                    state = 0
+            else:
+                if slope >= PITCH_ENTER_SEMITONES_PER_SEC:
+                    state = 1
+                elif slope > -PITCH_EXIT_SEMITONES_PER_SEC:
+                    state = 0
+            directions[index] = state
+    return directions.astype(int).tolist(), max(0, min(255, coverage))
+
+
+def _role_track(role, spectrum, duration, np, librosa):
+    output_times = _signal_times(duration, np)
+    native_times = librosa.frames_to_time(
+        np.arange(spectrum.shape[1]), sr=ANALYSIS_SR, hop_length=ee.HOP_LENGTH
+    )
+    energy = np.sqrt(np.mean(np.square(spectrum), axis=0)) if spectrum.size else []
+    activity = _normalized_activity(energy, native_times, output_times, np)
+    spans = _sustain_spans(activity)
+    track = {
+        "role": role,
+        "activityQ8": np.floor(activity * 255.0 + 0.5).astype(np.uint8).tolist(),
+        "sustainSpans": spans,
+    }
+    if role in PITCHED_ROLES:
+        directions, coverage = _pitch_directions(
+            spectrum,
+            ANALYSIS_SR,
+            native_times,
+            output_times,
+            activity,
+            spans,
+            np,
+            librosa,
+        )
+        track["pitchDirection"] = directions
+        track["pitchCoverageQ8"] = coverage
+    return track
+
+
+def _empty_role_track(role, frame_count):
+    track = {
+        "role": role,
+        "activityQ8": [0] * frame_count,
+        "sustainSpans": [],
+    }
+    if role in PITCHED_ROLES:
+        track["pitchDirection"] = [0] * frame_count
+        track["pitchCoverageQ8"] = 0
+    return track
+
+
+def _build_role_signals(analysis_stems, duration, np, librosa):
+    """Build all eight aligned role tracks from already accepted Demucs stems."""
+    output_times = _signal_times(duration, np)
+    tracks_by_role = {}
+    for name, mono in analysis_stems.items():
+        spectrum = np.abs(
+            librosa.stft(mono, n_fft=ee.N_FFT, hop_length=ee.HOP_LENGTH)
+        )
+        if name == "drums":
+            freqs = librosa.fft_frequencies(sr=ANALYSIS_SR, n_fft=ee.N_FFT)
+            bands = {
+                "kick": ee._band_slice(freqs, 20.0, 140.0),
+                "snare": ee._band_slice(freqs, 140.0, 2_500.0),
+                "percussion": ee._band_slice(freqs, 2_500.0, ANALYSIS_SR / 2.0),
+            }
+            for role, band in bands.items():
+                tracks_by_role[role] = _role_track(
+                    role, spectrum[band], duration, np, librosa
+                )
+        else:
+            role = STEM_ROLE.get(name)
+            if role is not None:
+                tracks_by_role[role] = _role_track(
+                    role, spectrum, duration, np, librosa
+                )
+
+    frame_count = int(output_times.size)
+    tracks = [
+        tracks_by_role.get(role, _empty_role_track(role, frame_count))
+        for role in ROLE_ORDER
+    ]
+    return {
+        "version": 1,
+        "frameRateHz": ROLE_SIGNAL_HZ,
+        "frameCount": frame_count,
+        "tracks": tracks,
+    }
 
 
 def _stem_onset_events(mono, sr, role, np, librosa):
@@ -185,9 +424,6 @@ def main() -> int:
     std = reference.std() + 1e-8
     wav_t = (wav_t - mean) / std
 
-    # Announce the device before the heavy separation so callers can confirm
-    # whether the GPU is actually in use. audio-events.ts forwards any
-    # "[motionscore]" line to the CLI verbose log and the web progress stream.
     print(
         f"[motionscore] stems: separating on {device.upper()} (model {MODEL_NAME})",
         file=sys.stderr,
@@ -197,7 +433,6 @@ def main() -> int:
     try:
         est = _separate(model, wav_t, device, apply_model, torch)
     except RuntimeError as err:
-        # Fall back to CPU on any CUDA runtime error (OOM, missing kernel, etc.).
         if device == "cuda":
             print(
                 f"[motionscore] stems: CUDA failed ({err}); retrying on CPU",
@@ -215,9 +450,6 @@ def main() -> int:
     est = (est * std + mean).cpu().numpy()
 
     stems = {name: est[i] for i, name in enumerate(sources)}
-
-    # Loudness per stem (RMS on the model-rate mono). Near-silent stems are
-    # separation bleed; skipping them stops phantom cross-role hits.
     stem_mono = {name: audio.mean(0) for name, audio in stems.items()}
     stem_rms = {
         name: (float(np.sqrt(np.mean(np.square(mono)))) if mono.size else 0.0)
@@ -228,11 +460,13 @@ def main() -> int:
 
     events = []
     active = []
+    analysis_stems = {}
     for name, mono in stem_mono.items():
         if stem_rms[name] < presence_floor:
             continue
         active.append(name)
         mono_a = librosa.resample(mono, orig_sr=model_sr, target_sr=ANALYSIS_SR)
+        analysis_stems[name] = mono_a
         if name == "drums":
             events.extend(_drum_role_events(mono_a, ANALYSIS_SR, np, librosa))
         else:
@@ -240,8 +474,9 @@ def main() -> int:
             if role is not None:
                 events.extend(_stem_onset_events(mono_a, ANALYSIS_SR, role, np, librosa))
     events.sort(key=lambda event: event["timeSec"])
+    role_signals = _build_role_signals(analysis_stems, duration, np, librosa)
 
-    # Continuous features + section cues from the full mix (reuse librosa path).
+    # Continuous full-mix features + structural section cues.
     y_full = librosa.to_mono(wav)
     y_a = librosa.resample(y_full, orig_sr=model_sr, target_sr=ANALYSIS_SR)
     arrays = ee._analyze_arrays(y_a, ANALYSIS_SR)
@@ -250,7 +485,9 @@ def main() -> int:
 
     try:
         tempo_arr, _ = librosa.beat.beat_track(
-            onset_envelope=arrays.percussive_onset, sr=ANALYSIS_SR, hop_length=ee.HOP_LENGTH
+            onset_envelope=arrays.percussive_onset,
+            sr=ANALYSIS_SR,
+            hop_length=ee.HOP_LENGTH,
         )
         tempo = float(np.atleast_1d(tempo_arr)[0]) if np.size(tempo_arr) else 0.0
     except Exception:
@@ -264,6 +501,7 @@ def main() -> int:
         "events": events,
         "featureFrames": frames,
         "sectionCues": cues,
+        "roleSignals": role_signals,
     }
     with open(out_path, "w", encoding="utf-8") as output_file:
         json.dump(result, output_file, allow_nan=False, separators=(",", ":"))
@@ -275,7 +513,8 @@ def main() -> int:
     print(
         f"extract_stems: device={device} model={MODEL_NAME} events={len(events)} "
         f"roles={role_counts} active={active} stem_rms={rms_report} "
-        f"cues={len(cues)} tempo={tempo:.1f}bpm dur={duration:.1f}s",
+        f"signal_frames={role_signals['frameCount']} cues={len(cues)} "
+        f"tempo={tempo:.1f}bpm dur={duration:.1f}s",
         file=sys.stderr,
     )
     return 0

@@ -1,482 +1,358 @@
-# Music-to-Physics Video Generator — Architecture & Design
+# MotionScore Architecture
 
-Working title: **MotionScore** (placeholder — rename freely).
+Last updated: 2026-07-23.
 
 ## 1. Goal
 
-Input a song (audio or MIDI). Output a video where a physical object (ball,
-marble, Line Rider sled, etc.) moves under physics and strikes a target
-(piano key, obstacle, note block) in exact sync with the song's notes/beats —
-in the visual style of DoodleChaos-style marble/piano videos and Line Rider
-music syncs.
+MotionScore turns audio or MIDI into synchronized physical animation. The current web experience targets the recognizable DoodleChaos mechanic: a small cast of actors moves through sparse black physical geometry, and the music determines where each actor **must be** at each event time. Gravity, catches, and sustained rails are solved backward to explain how it arrived there.
 
-**Non-negotiable quality bar:** the output must look good, not just be
-technically synced. A physically "correct" trajectory that looks stiff,
-robotic, or visually boring fails the brief. Aesthetics (camera, motion
-shaping, particles, color, timing feel) are a first-class requirement, not
-polish added at the end. See §6.
+The quality bar is both mechanical and perceptual:
 
-## 2. Guiding principle: build vs. use existing tools
+- every enabled musical event remains represented;
+- contact occurs at the event timestamp and at the actor surface;
+- motion reads as gravity/support rather than a waveform or generic impulse;
+- an actor's timing and motion make its musical role recognizable without relying on labels;
+- geometry is revealed as terrain, not displayed as a full future event chart;
+- the camera follows the race without audio shake or decorative clutter.
 
-Default to integrating mature open-source/library tools. Only build custom
-when an existing tool would degrade output quality, lock us out of control we
-need, or block future extensibility. Applied per-stage in §4 and summarized
-in the decision log (§5).
+## 2. Current runtime paths
 
-## 3. Pipeline overview
+There are two related paths during the migration to the new scene:
 
-```
- [Audio or MIDI file]
-        │
-        ▼
- STAGE A — Input Normalization
-        │  (raw audio buffer, or parsed MIDI passthrough)
-        ▼
- STAGE B — Note/Event Extraction        ["Transcription" module]
-        │  → NoteEvent[]  (schema in §7.1)
-        ▼
- STAGE C — Musical Mapping               ["Arrangement" module]
-        │  → ChoreographyTarget[]  (schema in §7.2)
-        ▼
- STAGE D — Choreography / Trajectory Solver   ["Trajectory" module — CORE IP]
-        │  → Trajectory  (schema in §7.3)
-        ▼
- STAGE E — Simulation & Rendering         ["Renderer" module]
-        │  → raw video frames + audio track
-        ▼
- STAGE F — Art Direction / Post           ["Aesthetics" module]
-        │  → graded, styled frames
-        ▼
- ffmpeg mux (frames + original audio)
-        │
-        ▼
- [Final video file]
+### Live audio race (current web path)
+
+```text
+Audio
+  -> Stage B analyzer (librosa or Demucs)
+  -> AudioAnalysis { hits, featureFrames, sectionCues, roleSignals? }
+  -> server /api/result + /api/audio
+  -> scene2d buildScene2D()
+       semantic grouping -> target placement -> ballistic/rail solve
+  -> renderScene2D(browser Canvas, audio.currentTime)
 ```
 
-Each stage is written as an independent module with a stable data contract on
-either side. Any stage's underlying library can be replaced without touching
-neighboring stages, as long as it still produces/consumes the same schema.
-This is the mechanism that keeps the project extensible — treat each stage
-below as a self-contained unit of work that could be built, tested, or
-reassigned independently.
+For audio uploads, the pipeline uses `skipRender`; the browser renders directly from the complete analysis while the original audio element supplies the clock.
 
-## 4. Module breakdown
+### Legacy MIDI / baked-video path
 
-### Stage B — Note/Event Extraction
+```text
+MIDI or extracted NoteEvent[]
+  -> mapNotes / planVoices
+  -> solveChoreography
+  -> @napi-rs/canvas stream renderer
+  -> ffmpeg mux
+```
 
-**Purpose:** convert input into physically hittable musical events. MIDI retains exact
-notes; mixed audio produces a role-labelled salient hit track plus continuous
-features and structural section cues.
+This path remains operational, but it does not yet use the neural race scene. The `scene2d` renderer depends on a deliberately small `Ctx2D` interface shared by browser Canvas and `@napi-rs/canvas`, so it is ready for exporter integration without a visual rewrite.
 
-**Rules:**
-- If input is already MIDI, parse it directly. Do not run it through an audio
-  model. Direct parsing is exact.
-- Mixed audio defaults to the smart analyzer, not full note transcription. It
-  uses librosa HPSS plus independent low/mid/high onset envelopes to approximate
-  percussive, bass, and harmonic stems. Candidate attacks are assigned roles,
-  ranked by salience, merged when simultaneous, and suppressed when repetitive.
-- Keep `beats` as a sparse metrical comparison mode and `onsets` as a denser
-  full-mix comparison mode. Beat tracking alone omits fills and syncopation;
-  raw onsets alone do not distinguish musical importance.
-- Keep Basic Pitch as explicit `notes` mode for sparse solo/pitched recordings.
-  It is intentionally not the mixed-song default because polyphonic notes and
-  chords create too many targets for one physical object.
-- True neural source separation (Demucs or a maintained equivalent) is an
-  optional future high-quality mode. It must feed the same role/onset selector;
-  every spike from every stem must never become a hit automatically.
-- Discrete ball hits and longer scene controls are separate outputs. Loudness,
-  bass energy, brightness, onset density, and harmonic/percussive energy are
-  sampled at 10 Hz; builds, drops, breakdowns, rises, and falls are emitted as
-  section cues with confidence. These do not create extra ball impacts.
+## 3. Design principles
 
-**Build vs. use:** use mature librosa DSP primitives; build only the project-
-specific salience, merging, trend detection, and physical-reachability policy.
-Do not train a transcription or source-separation model from scratch.
+1. **Analysis and choreography have separate semantics.** Discrete hits say when an impact must happen. Continuous role activity says when physical support may exist. Full-mix features and section cues describe longer musical structure; they do not manufacture impacts.
+2. **Targets precede trajectories.** The planner chooses music-fixed contacts first, then solves the path between them. It never animates a generic envelope and hopes it appears synchronized.
+3. **No silent event loss.** Enabled neural events are mapped one-to-one. Dense passages change geometry (steps and shorter contacts), not event count.
+4. **A few semantic actors beat many lanes.** Source roles are grouped into rhythm, bass, and lead, preserving note identity while avoiding an eight-lane visualizer.
+5. **Geometry must be physical.** A black line is a collision surface or a sustained support. Unsupported time is freefall; no decorative path is drawn through it.
+6. **Determinism is the synchronization mechanism.** Planning and sampling are pure functions of analysis/settings/time. Playback, seeking, screenshots, and future exports therefore agree.
+7. **Effects do not substitute for causality.** Detached rings, labels, particles, terrain, shake, and always-visible traces were rejected because they obscured rather than explained the music-motion relationship.
 
-**Output:** `NoteEvent[]` for the existing pipeline, or rich `AudioAnalysis`
-(`hits`, `featureFrames`, `sectionCues`) for analysis UI/future renderers.
+## 4. Stage B — event and signal extraction
 
-**Implementation reference:** the concrete algorithm, JSON schema, tuning
-constants, limits, and web integration are documented in `AUDIO_ANALYSIS.md`.
+### 4.1 MIDI
 
-### Stage C — Musical Mapping
+MIDI is parsed directly. Exact note timing, pitch, duration, velocity, track, and instrument are retained; no audio analyzer is involved.
 
-**Purpose:** map retained events to lane/x-position/color and impact size, then
-stabilize analyzer-generated target positions so short event gaps cannot demand
-full-screen lateral jumps. MIDI pitch mapping remains exact; audio hit roles and
-position hints are choreography controls rather than literal transcription.
-Define the physical layout (piano key positions, lanes, obstacle map) here.
+### 4.2 Lightweight audio modes
 
-**Build vs. use:** build. This is bespoke creative/business logic specific to
-the aesthetic being targeted, not a solved problem elsewhere. Keep it
-pluggable — a "marble/piano" layout strategy and a "Line Rider lane" layout
-strategy should both implement the same interface so Stage D never needs to
-know which one is active.
+`smart`, `beats`, and `onsets` use librosa. The smart analyzer combines HPSS, low/mid/high onset envelopes, salience, confidence, and whole-song-relative structural analysis. `notes` uses Basic Pitch for sparse pitched recordings.
 
-**Output:** `ChoreographyTarget[]` — see §7.2.
+These modes emit:
 
-### Stage D — Choreography / Trajectory Solver
+- `hits`: audio `NoteEvent`s;
+- 10 Hz full-mix `featureFrames`;
+- structural `sectionCues` (`build`, `drop`, `breakdown`, `rise`, `fall`).
 
-**Purpose:** the actual hard problem. Given a start state and a sequence of
-(position, time) targets, compute the physical motion — initial velocity, or
-a full track spline — such that the object arrives at each target at the
-exact required time, while looking physically plausible and visually
-pleasing.
+Their role names are frequency-band heuristics, so they are useful for lightweight analysis but not guaranteed instrument identity.
 
-No off-the-shelf tool solves this end-to-end today (confirmed independently
-across multiple research passes — see `RESEARCH_NOTES.md` §2). Rhythm-game
-auto-mappers (osu!, Beat Saber) solve *when* and a stylistic *where*, but
-their hit objects can appear anywhere on screen instantly — no gravity,
-momentum, or continuous-motion constraint to satisfy. They are useful
-reference for timing/placement conventions, not for the physics-arrival
-problem itself.
+### 4.3 Neural stems mode (implemented)
 
-Three tiers, in increasing order of difficulty and visual payoff. Build in
-this order:
+`stems` runs Demucs `htdemucs_6s` on CUDA when available, with CPU fallback. It separates drums, bass, other, vocals, guitar, and piano. Drum bands produce kick/snare/percussion; the other stems map directly to bass/melodic/vocal/guitar/piano.
 
-1. **Time-warping.** Simulate freely with a fixed layout, record natural
-   collision timestamps, then non-linearly retime playback so each collision
-   lands on the corresponding note onset. Cheapest to implement; likely what
-   most consumer "satisfying ball" apps do. Good for a first end-to-end
-   smoke test, not the final aesthetic target.
-2. **Closed-form ballistic solve (recommended primary tier).** Between two
-   hits, an object in freefall follows a parabola. Given a fixed start
-   point, a target point, and a target duration (from the note timing),
-   SUVAT kinematics let you solve directly for the exact initial velocity —
-   pure algebra, no iteration. Chain arcs together and every hit lands
-   exactly on time. This is the core of the marble/piano-key aesthetic and
-   is genuinely tractable to build and get looking good.
-3. **Track/spline optimization (shooting method).** Required for
-   continuous-contact styles (Line Rider sled). The track shape itself
-   determines arrival time, so there's no closed form — parameterize the
-   track as a spline with adjustable control points, simulate, measure
-   timing error at each waypoint, adjust control points, repeat until
-   converged. Materially harder than tier 2. Do not start here.
+A relative + absolute RMS presence gate removes near-silent separation bleed. Accepted stems produce two independent products:
 
-**Aesthetics requirement specific to this stage:** a minimum-energy or
-first-valid solution to the timing constraint will often look flat or
-robotic. The solver should expose extra style parameters beyond the minimum
-required to hit the timing (e.g. preferred arc height/apex, approach angle,
-easing/anticipation before impact, variety across consecutive hits) so
-Stage F / art direction has real degrees of freedom to work with, not a
-single rigid answer. Treat "looks good" as a solver constraint, not a
-post-process.
+1. exact discrete onset events;
+2. `roleSignals`, a compact continuous per-role waveform description.
 
-**Build vs. use:** build. This is the project's core differentiator. Reuse
-math/literature where it helps (SUVAT for tier 2; shooting methods and
-boundary-value/trajectory-optimization literature from robotics/controls for
-tier 3 — see open question in `RESEARCH_NOTES.md` §6), but there is no
-library to import here.
+The stems analyzer emits one fixed-order role track at 10 Hz for each canonical role:
 
-**Output:** `Trajectory` — see §7.3.
+```ts
+type PitchDirection = -1 | 0 | 1;
+type SustainSpan = [startFrame: number, endFrame: number];
 
-### Stage E — Simulation & Rendering
+interface RoleSignalTrack {
+  role: HitRole;
+  activityQ8: number[];          // integers 0..255
+  sustainSpans: SustainSpan[];   // sorted, non-overlapping
+  pitchDirection?: PitchDirection[];
+  pitchCoverageQ8?: number;      // integer 0..255
+}
 
-**Purpose:** simulate frame-by-frame for physical/visual verification and
-render the final visuals — camera, geometry, lighting, particles, trails,
-color.
+interface RoleSignals {
+  version: 1;
+  frameRateHz: 10;
+  frameCount: number;
+  tracks: RoleSignalTrack[];
+}
+```
 
-**Physics engine:** needed mainly to refine/verify tier 3 (continuous
-contact) and to give tier 2 believable collision response (bounce, spin,
-particle triggers) rather than just moving a dot along a precomputed curve.
-Prioritize **continuous collision detection (CCD)** support over raw
-"determinism" claims — determinism mostly buys cross-machine/replay
-consistency (multiplayer-style guarantees), not precision within a single
-render. CCD is what actually gets you an accurate sub-step collision
-timestamp, which is what this project needs. See `RESEARCH_NOTES.md` §4 for
-the current engine shortlist and confidence levels on each.
+Pitch fields are valid only for bass, melodic, piano, guitar, and vocal. Empty/absent stems still have an all-zero canonical track, keeping the wire shape deterministic.
 
-**Build vs. use:** use an existing physics engine. Do not write a
-general-purpose rigid-body engine from scratch. A minimal custom solver for
-one specific case (e.g. ball-on-peg, as MusicMarbles' author did) remains an
-acceptable fallback only if a general engine can't expose the precise
-collision-timestamp control this project needs.
+### 4.4 Trust boundary and event preservation
 
-**Rendering/export:** use an existing rendering library (Three.js/React
-Three Fiber or PixiJS/Canvas for a web stack; Pygame/Cairo/Manim for a
-Python stack) and `ffmpeg` (native or `ffmpeg.wasm`) for final video export
-and audio muxing. No reason to build either from scratch.
+`packages/note-extractor/src/audio-events.ts` treats analyzer JSON as untrusted. It validates finite ranges, mode, event arrays, feature frames, cues, and every role-signal invariant: version, exact 10 Hz rate, frame-count agreement, canonical role order, exact array lengths, Q8 bounds, sorted valid spans, direction values, and pitched-only fields.
 
-**Implementation status (2D streaming path).** The shipped renderer
-(`packages/renderer/src/stream-render.ts`, `renderAndEncodeVoices`) draws each
-frame with `@napi-rs/canvas` and pipes raw RGBA straight to `ffmpeg` stdin
-(`rawvideo`), skipping per-frame PNG encode + disk I/O. Performance/RAM design
-notes:
-- The background + resting target keys are drawn once into an offscreen
-  "static layer" and blitted per frame (not redrawn), so cost is independent of
-  target/ball count — this was the dominant multi-ball slowdown.
-- Ball positions are interpolated lazily per frame (no precomputed
-  `positions[totalFrames]` per voice), keeping memory flat over long songs.
-- Pixels are copied from the live `canvas.data()` view into two reused,
-  alternated frame buffers (backpressure drains each large write before a
-  buffer is reused), avoiding an ~8 MiB allocation per frame.
-- Encoder selection (`pipeline.ts` `resolveCodec`): an explicit `--codec` wins;
-  otherwise `detectAvailableEncoders()` runs a real one-frame test-encode per
-  candidate and prefers a working GPU encoder (`h264_nvenc` > `h264_amf` >
-  `h264_qsv`) over `libx264` (which defaults to `-preset veryfast`).
+After validation, `buildNoteEvents()` stable-sorts raw events and maps every valid event to one `NoteEvent`. There is no downstream 90 ms TypeScript thinning and no per-second count cap. Analyzer-level perceptual peak selection still determines what constitutes an onset, but downstream code does not silently discard accepted neural events.
 
-### Stage F — Art Direction / Post-processing
+Detailed extraction behavior lives in `AUDIO_ANALYSIS.md`.
 
-**Purpose:** the layer that turns "technically synced" into "looks good":
-camera moves/follow, particle and impact effects, trails, color
-grading/palette per pitch or section, background art, motion blur.
+## 5. Stages C/D — semantic race choreography
 
-Keep this as a distinct, swappable layer on top of Stage E's raw simulation
-output rather than baked into the physics or renderer code, so visual style
-can change without touching simulation logic.
+The live scene combines arrangement and trajectory solving in `packages/web/src/client/src/scene2d/model.ts`. The legacy mapper/solver packages remain for the baked-video path.
 
-**Implementation status: real-time 2D "DoodleChaos" renderer (web, shipped).**
-An earlier 3D React-Three-Fiber renderer was tried and rejected as busy and
-misaligned; it was removed. The live view is now a strict, deterministic 2D
-canvas renderer in `packages/web/src/client/src/scene2d/` (framework-agnostic —
-it draws through a minimal `Ctx2D` interface so the same module can later drive
-the Node MP4 exporter and stay pixel-identical). Concept: time maps to
-horizontal distance (`x = t·SCROLL_X`) and the whole scene drifts down; a few
-balls (busiest instrument roles, capped low) bounce on beat-aligned parabolic
-arcs (kinematic inversion — contact lands exactly on the beat) around their own
-lanes, and glide along a line during `rise`/`fall` section cues. Art direction
-is intentionally minimal: near-white paper, near-black track (a short "kicker"
-tick at each contact + slide polylines), solid role-colored balls. The camera is
-purely positional — it follows the balls and fit-zooms to frame them with a
-fixed look-ahead window; it never reacts to audio energy (no shake). Everything
-is a closed-form function of `<audio>.currentTime` (frame-accurate, seek-safe),
-built from the `AudioAnalysis` sent to the client via `GET /api/result` +
-`GET /api/audio`. Key files: `scene2d/{model,render,types,settings}.ts`,
-`components/LiveScene.tsx` (canvas + rAF loop), `components/RideControls.tsx`
-(role toggles + ball cap). The old 2D node-canvas path is still the downloadable
-baked MP4. Follow-up: share the `scene2d` module with the exporter so the
-downloaded video matches the live view (currently it uses the older piano-key
-renderer).
+### 5.1 Actor selection
 
-### Alternate track: Line Rider-specific integration
+By default, enabled source roles are grouped deterministically:
 
-If the Line Rider aesthetic is pursued (after the marble/piano tier is
-solid — see roadmap, §8):
-
-- No tool auto-generates a synced track from a song today. Confirmed across
-  every research pass. Stage D tier 3 must be built regardless of target
-  engine.
-- Prefer targeting **linerider.com's** own track JSON format / scripting
-  surface over the desktop `linerider-advanced` fork, which is stale (see
-  `RESEARCH_NOTES.md` §5 — last tagged release 2018). If a native/desktop
-  renderer with built-in `ffmpeg` export is preferred instead, target the
-  actively maintained **LRA-Community-Edition** fork rather than the
-  original.
-- `jndean/LossRider` is useful only as proof that programmatic track-file
-  generation from Python is straightforward once coordinates are computed —
-  it is not reusable choreography logic.
-- DoodleChaos's own Line Rider tooling is confirmed closed-source
-  (Patreon-gated Unity project files) — treat as inspiration only, not a
-  fork target.
-
-## 5. Decision log (build vs. buy, per stage)
-
-| Stage | Decision | Rationale |
+| Actor | Source roles | Motion character |
 |---|---|---|
-| B — Mixed-audio events | **Use librosa DSP + custom selection.** HPSS/multi-band onsets provide pseudo-stems; project code ranks, merges, labels, and suppresses hits. | Mature signal processing without a heavyweight model; selection is choreography-specific. |
-| B — Full note transcription | **Use Basic Pitch only in explicit `notes` mode.** | Useful for sparse pitched recordings, too dense as the mixed-song default. |
-| B — Neural stems | **Optional future adapter.** Evaluate a maintained Demucs-compatible tool before pinning a model. | Higher isolation quality, but large dependencies/model downloads and slower preprocessing. |
-| C — Musical mapping | **Build.** | Bespoke creative logic, not a solved external problem. |
-| D — Trajectory solver | **Build.** | Core IP. No existing tool solves timed-arrival physics choreography. |
-| E — Physics simulation | **Use existing engine** (see `RESEARCH_NOTES.md` §4 for shortlist). Custom minimal solver only as fallback for one specific object/collision type. | Rigid-body physics is a solved, hard-to-outperform problem. |
-| E — Rendering/export | **Use existing libraries** (Three.js/PixiJS/Manim + ffmpeg). | No reason to reinvent rendering or encoding. |
-| Line Rider integration | **Target existing engine's format** (linerider.com or LRA-Community-Edition) rather than writing a Line Rider clone. | Preserves the exact aesthetic without rebuilding a full sled physics/rendering stack. |
+| rhythm | kick, snare, percussion | staccato catches and rapid steps |
+| bass | bass | heavy catches and sustained rails |
+| lead | melodic, piano, guitar, vocal | pitched rails, arcs, phrase crossings |
 
-## 6. Aesthetics — explicit requirements
+A group exists only if it has enabled hits or continuous activity, so a scene contains one to three actors by default. Exact co-timed notes in one group share a contact, but that contact stores every source `noteId`.
 
-Treat these as acceptance criteria, not nice-to-haves:
+This grouping is the default, not a hard constraint. `buildScene2D` uses `settings.actorGroups` when the user supplies a custom grouping (see §5.7), so the scene can range from one ball per role (up to eight) to a single ball fed by every role. `ACTOR_GROUPS` in `model.ts` is only the fallback when no custom grouping is set.
 
-- Motion between hits should read as physically grounded (real gravity/arc
-  feel), even where Stage D takes creative liberties with initial velocity
-  to hit timing.
-- Impacts need visual and audio weight (particle burst, squash/stretch,
-  screen shake or camera reaction scaled to velocity/note velocity value).
-- Color/lane mapping should be visually legible (e.g. circle-of-fifths or
-  similar consistent, pleasant color mapping per pitch — reference: the
-  marble/piano write-up in `RESEARCH_NOTES.md` §2 used this approach).
-- Frame-accurate scheduling: if simulation runs on a fixed frame rate, verify
-  note onsets are being hit within a perceptually acceptable tolerance (a
-  handful of milliseconds), not just "close enough" — audio/visual sync
-  errors above roughly 20-30ms become noticeable. Decide and document the
-  tolerance budget once the render frame rate is fixed.
-- Camera should not be static/orthographic by default if avoidable — framing
-  and movement materially affect how "premium" the output feels compared to
-  the flat commercial "satisfying ball" tools.
+### 5.2 Music-fixed targets
+
+For each actor, contacts and support boundaries become anchors. Time maps monotonically to world X (`SCROLL_X = 6`) plus a small actor race bias. World Y descends over time (`DRIFT_Y = 0.72`) and is shaped by event spacing, support activity, rapid passages, and phrase choreography.
+
+The planner first places all anchors, then applies deterministic phrase-level convergence/crossover adjustments. The strongest shared contact cluster in each phrase is the musical reason for actors to approach or exchange ordering; there is no random weaving.
+
+### 5.3 Ballistic segments
+
+Unsupported intervals use exact constant-gravity motion with `g = (0, GRAVITY)`, `GRAVITY = 18`. For endpoints `p0`, `p1` separated by `dt`, the required launch velocity is solved directly:
+
+```text
+v0 = (p1 - p0 - 0.5*g*dt^2) / dt
+p(t) = p0 + v0*t + 0.5*g*t^2
+```
+
+This guarantees endpoint timing without iterative simulation. A rest/silence ends support and leaves the actor on this freefall path.
+
+### 5.4 Sustained rails
+
+Neural `sustainSpans` create supported slide segments. The rail is a cubic curve through its anchors; shared anchor slopes give adjacent pieces C1 continuity. Pitched-role direction biases the rail slope, making register movement visible without drawing pitch labels. Support struts are reserved for genuine catches or structurally heavy support, not stamped under every short onset.
+
+### 5.5 Contacts and dense passages
+
+Rapid events become compact descending steps. Contact-line length derives from nearby event spacing, so dense music creates appropriately short surfaces rather than deleting contacts or producing a black wall.
+
+After segments are built, the planner samples incoming/outgoing velocities at each contact. Their physical tangent/normal sets the line orientation and the ball-surface point. Slide contacts take precedence over rapid/high-fall classification, and high-fall catches apply only to incoming ballistic motion.
+
+### 5.6 Separation
+
+Actor-specific X bias and deterministic anchor adjustments preserve a minimum center distance while still allowing paths to cross visually. This is validated over the sampled full song rather than assumed from fixed lanes.
+
+### 5.7 User configuration (grouping and manual overrides)
+
+`Scene2DSettings` carries three song-independent, serializable knobs consumed by `buildScene2D`:
+
+- `roleVisible: Record<HitRole, boolean>` — per-role opt-in before grouping.
+- `actorGroups?: ActorGroupConfig[]` — optional custom grouping. Each entry is `{ id, kind, label, color, roles }` and becomes one ball. When present it fully replaces the default `ACTOR_GROUPS`; when absent the default is used. A role should appear in at most one group (the UI enforces this by moving a role out of any other group when it is assigned).
+- `actorOverrides?: Record<actorId, { yOffset, rotationDeg }>` — manual spatial adjustment per ball, keyed by group `id`.
+
+Overrides are applied by `applyActorOverride` after automatic planning and convergence, then rhythm hops are re-clamped. Two deliberate correctness choices:
+
+1. **Rotation is a vertical shear, not a world rotation.** `y += yOffset + tan(rotationDeg) * (x - pivotX)`, with `x` left untouched. The whole pipeline assumes `x == timeSec * SCROLL_X + bias` and monotonic (camera framing and x-based visibility culling depend on it). A true rotation would couple into `x`, could reverse it on tall paths, and would desynchronize time from horizontal position. For the near-horizontal race paths a shear looks like a tilt while keeping every downstream invariant intact. The pivot is the actor's first anchor, so a positive angle tilts the later end downward.
+2. **The bounce invariant outranks the override.** `enforceRhythmHops` runs *after* the override, so a strong downward tilt on a rhythm ball is re-clamped and can never re-introduce a sagging arc. A rhythm ball therefore resists extreme downward tilt by design; pitched/bass balls tilt freely.
+
+Custom settings persist across "New Video". If a persisted custom grouping references only roles absent from a newly loaded song, every ball filters out and the scene is empty; the controls expose "Reset to default" to recover.
+
+## 6. Stage E/F — Canvas rendering and art direction
+
+`packages/web/src/client/src/scene2d/render.ts` renders a sparse physical world:
+
+1. near-white paper background;
+2. visible portions of black sustained rails and supports;
+3. black physical impact/catch lines;
+4. solid actor circles, drawn last.
+
+There are no fixed lanes, canvas labels, detached rings, waveform/trajectory traces, terrain, particles, or screen shake. Impact squash and the seam are transformed from the sampled actor/contact itself, so they remain attached during collision.
+
+### Temporal geometry
+
+Geometry is time-revealed so it reads as upcoming terrain rather than a full event visualization:
+
+- contact preview: `0.10 s`;
+- contact trail: `0.58 s`;
+- rail look-behind: `0.48 s`;
+- rail look-ahead: `0.90 s`.
+
+Every contact still appears at its own time. Temporal reveal changes visibility, not representation.
+
+### Camera
+
+The camera follows the actor pack and fit-zooms to where most balls are, moving through the right-and-down world without audio-energy shake. The camera state resets on seek so random-access playback and snapshot rendering remain deterministic.
+
+Fit zoom uses a **trimmed** vertical extent, not the raw min/max envelope. Positions are time-sampled over the look-ahead window across all actors; the vertical band is the `[trim, 1-trim]` percentile of those samples, with `trim = clamp(0.5 / actorCount, 0.03, 0.12)`. Because each ball contributes a `1/actorCount` share of samples and `trim < 1/actorCount`, a ball that is *persistently* offset (its whole window sits high/low) is kept in frame, while a ball that *briefly* jumps very high or free-falls during a rest occupies only a few samples and is trimmed — it may leave frame instead of forcing everyone to shrink. This directly fixes the "one ball per sound zooms everything out" problem. A per-actor-count spread cap (`BALL_R*12 + actorCount*3.2`) and a raised minimum scale (`8`) are hard backstops so the view can never collapse to an unreadable size regardless of ball count. Verified with 8 balls and a ball jumping out of the pack: scale stayed ~20–35 px/unit (ball radius ≥4.5 px) with smooth per-frame change (~0.08).
+
+### Shared renderer boundary
+
+The scene renderer uses `Ctx2D`, the intersection of browser Canvas 2D and `@napi-rs/canvas`. It has no React or DOM dependency. `LiveScene.tsx` owns only canvas sizing, the `requestAnimationFrame` loop, and audio time. This separation is what allows the same model/render functions to be moved into the Node exporter later.
 
 ## 7. Data contracts
 
-These schemas are the actual mechanism for extensibility: any stage's
-implementation can be swapped as long as it still emits/consumes these
-shapes. Version them (`schemaVersion`) so future format changes don't
-silently break older generated content or cached intermediate files.
+### 7.1 `NoteEvent`
 
-### 7.1 `NoteEvent[]` — output of Stage B
-
-```json
-{
-  "schemaVersion": "1.0",
-  "source": { "type": "audio|midi", "file": "song.wav", "durationSec": 182.4 },
-  "notes": [
-    {
-      "id": "n0001",
-      "pitchMidi": 60,
-      "startSec": 1.203,
-      "endSec": 1.560,
-      "velocity": 0.82,
-      "source": "audio",
-      "role": "kick|bass|snare|percussion|melodic",
-      "confidence": 0.91,
-      "salience": 0.88,
-      "track": "melody",
-      "instrument": "piano"
-    }
-  ]
+```ts
+interface NoteEvent {
+  id: string;
+  pitchMidi: number;
+  startSec: number;
+  endSec: number;
+  velocity: number;
+  source?: 'midi' | 'audio';
+  role?: HitRole;
+  confidence?: number;
+  salience?: number;
+  track?: string;
+  instrument?: string;
 }
 ```
 
-For mixed audio, `pitchMidi` is a stable horizontal-position hint derived from
-the event role rather than a claim that a drum transient has a literal pitch.
-`source`, `role`, `confidence`, and `salience` are optional so direct MIDI remains
-backward-compatible. The mapper activates audio-only lane/slew hints only when
-`source` is explicitly `audio`; a role-labelled MIDI event keeps exact pitch
-placement.
+For heuristic/stems audio, `pitchMidi` is a choreography/register hint, not a claim that a transient has a literal MIDI pitch.
 
-### 7.1b `AudioAnalysis` — rich mixed-audio output
+### 7.2 `AudioAnalysis`
 
-```json
-{
-  "version": 1,
-  "durationSec": 182.4,
-  "tempoBpm": 128.0,
-  "mode": "smart",
-  "hits": ["NoteEvent", "..."],
-  "featureFrames": [
-    {
-      "timeSec": 0.1,
-      "loudness": 0.54,
-      "bassEnergy": 0.61,
-      "brightness": 0.42,
-      "onsetDensity": 0.35,
-      "harmonicEnergy": 0.48,
-      "percussiveEnergy": 0.67
-    }
-  ],
-  "sectionCues": [
-    {
-      "type": "build|drop|breakdown|rise|fall",
-      "startSec": 40.0,
-      "endSec": 44.2,
-      "peakSec": 44.2,
-      "intensity": 0.89,
-      "confidence": 0.84
-    }
-  ]
+```ts
+interface AudioAnalysis {
+  version: 1;
+  durationSec: number;
+  tempoBpm: number;
+  mode: AudioAnalysisMode;
+  hits: NoteEvent[];
+  featureFrames: AudioFeatureFrame[];
+  sectionCues: SectionCue[];
+  roleSignals?: RoleSignals;
 }
 ```
 
-`featureFrames` and `sectionCues` are intentionally not encoded as ball hits.
-They are future renderer inputs for camera motion, vibration, long pre-drop
-movement, lighting, particles, and environment deformation.
+`roleSignals` is additive and optional, preserving compatibility with MIDI and non-stems analyzers.
 
-### 7.2 `ChoreographyTarget[]` — output of Stage C
+### 7.3 Scene settings
 
-```json
-{
-  "schemaVersion": "1.0",
-  "layout": {
-    "type": "piano-keys|lanes|track",
-    "positions": { "60": { "x": 120, "y": 0 } }
-  },
-  "targets": [
-    {
-      "noteId": "n0001",
-      "timeSec": 1.203,
-      "position": { "x": 120, "y": 0 },
-      "impactSize": 0.82,
-      "colorHint": "#4477ff",
-      "role": "kick"
-    }
-  ]
+```ts
+interface ActorGroupConfig { id: string; kind: ActorKind; label: string; color: string; roles: HitRole[]; }
+interface ActorOverride { yOffset: number; rotationDeg: number; }
+
+interface Scene2DSettings {
+  roleVisible: Record<HitRole, boolean>;
+  actorGroups?: ActorGroupConfig[];
+  actorOverrides?: Record<string, ActorOverride>;
 }
 ```
 
-### 7.3 `Trajectory` — output of Stage D
+All fields are optional-additive and serializable; `mergeSceneSettings` fills defaults. See §5.7 for semantics.
 
-```json
-{
-  "schemaVersion": "1.0",
-  "objects": [
-    {
-      "objectId": "ball_01",
-      "keyframes": [
-        { "tSec": 0.0, "pos": [0, 0], "vel": [3.2, -1.1] },
-        { "tSec": 1.203, "pos": [120, 0], "vel": [1.0, 4.5], "hitsTarget": "n0001" }
-      ]
-    }
-  ]
-}
-```
+### 7.4 Scene model
 
-Stage E consumes `Trajectory` plus the physics engine to simulate/verify and
-render. It does not need to know how the trajectory was computed.
+The live planner produces a `Scene2DModel` containing actors, contacts, ballistic/slide segments, physical constants, bounds, and source/represented hit counts. Sampling functions are part of the contract:
 
-## 8. Roadmap
+- `sampleActor(actor, timeSec)`;
+- `sampleActorVelocity(actor, timeSec)`;
+- `sampleRaceSegment(segment, timeSec)`;
+- `sampleRaceVelocity(segment, timeSec)`.
 
-- **M0 — Scaffolding.** This document + `RESEARCH_NOTES.md`. Repo structure,
-  schemas fixed as above.
-- **M1 — Correctness prototype (MIDI in).** Parse MIDI directly →
-  `NoteEvent[]` → naive Stage C (one lane per pitch range) → closed-form
-  ballistic Stage D → minimal 2D renderer (plain shapes, no art direction).
-  Goal: prove hits land exactly on time. No aesthetics yet.
-- **M2 — Audio input.** Smart librosa HPSS/multi-band hit analysis is the
-  default; beat, onset, and optional Basic Pitch note modes remain available.
-  Continuous feature frames and structural cues are produced for future scene
-  control. Validate and tune thresholds on a diverse real-song corpus.
-- **M2.1 — High-quality stems (optional).** Benchmark a maintained neural stem
-  separator against the lightweight default. Add it only when the hit-selection
-  improvement justifies model downloads, runtime, and deployment complexity.
-- **M3 — Aesthetic pass.** Swap in the chosen physics engine, add
-  camera/particles/trails/color (Stage F), ffmpeg export with muxed audio.
-  This is where the project starts looking like the reference videos.
-- **M4 — Scale/expand tier.** Either: (a) scale the marble/piano tier —
-  chords, multiple simultaneous objects, richer layouts; or (b) begin tier-3
-  exploration for Line Rider-style continuous tracks. Treat as parallel
-  optional tracks, not a required sequence.
-- **M5 — Stretch.** Higher-accuracy/multi-instrument transcription swap-in,
-  commercial transcription API integration if productizing.
+Render code samples this solved model; it does not reconstruct musical motion independently.
 
-## 9. Known risks
+## 8. Correctness invariants
 
-- **Aesthetic risk:** physically-correct ≠ good-looking. Mitigated by
-  treating style parameters as first-class solver inputs (§4, §6), not a
-  post-hoc pass.
-- **Sync tolerance risk:** frame-rate quantization can make hits feel
-  slightly off even when "technically" correct. Needs an explicit tolerance
-  budget once frame rate is fixed.
-- **Licensing risk:** at least one leading transcription model under
-  consideration is non-commercial-only as of this writing. Do not lock in a
-  transcription dependency without checking current license — see
-  `RESEARCH_NOTES.md` §1 and §7.
-- **Dependency staleness risk:** the obvious Line Rider desktop target is
-  unmaintained since 2018. Don't build deep integration against it without
-  confirming an actively maintained alternative is genuinely viable first.
-- **Scope sequencing risk:** Line Rider tier 3 is a harder R&D problem than
-  the marble/piano tier 2. Sequenced last in the roadmap for this reason —
-  don't reorder without accepting the extra risk.
+The current implementation is expected to preserve these invariants:
 
-## 10. Extensibility principles (for future contributors)
+1. `representedHitCount === sourceHitCount` for enabled roles.
+2. X progress remains positive through the race.
+3. Every segment samples exactly to its two anchors.
+4. At each contact, actor center-to-surface distance equals `BALL_R` within floating-point tolerance.
+5. Physical line tangent/normal derives from local segment velocity.
+6. Sustained support exists only where neural role activity supports it.
+7. Unsupported time is ballistic freefall and has no drawn path.
+8. Actors do not violate the required center separation except where a future design explicitly models a collision, or where the user has manually overridden positions.
+9. Live sampling is deterministic under playback and seeking.
+10. `x == timeSec * SCROLL_X + bias` and monotonic for every actor, including under manual overrides (rotation is a vertical shear, never a world rotation).
+11. The rhythm bounce invariant (no sagging ballistic arc) holds after manual overrides, because hops are re-clamped last.
 
-- Never let Stage D or E know about "piano keys" or "marbles" specifically —
-  they operate on the generic `ChoreographyTarget[]` / `Trajectory` schemas.
-  Aesthetic-specific knowledge belongs in Stage C (what a target is) and
-  Stage F (how it's dressed up visually), not in the physics/timing core.
-- Any new input modality (e.g. sheet music/MusicXML) only needs a new Stage
-  B adapter that emits `NoteEvent[]` — nothing downstream should need to
-  change.
-- Any new visual style (Line Rider, marbles, dominoes, whatever comes next)
-  only needs a new Stage C layout strategy + Stage F art direction pass, as
-  long as Stage D's solver tier supports the motion type (discrete-target
-  ballistic vs. continuous-track).
-- Keep `RESEARCH_NOTES.md` as a living document, not a one-time snapshot —
-  the transcription and physics-engine landscape are moving quickly (see
-  version dates throughout that file).
+## 9. Validation evidence
+
+The real neural path was run on `music/01 - Gary Moore - Still Got The Blues.mp3`:
+
+- `mode=stems`, duration `250.96 s`;
+- `5,900` source hits and `2,510` 10 Hz signal frames;
+- `5,900/5,900` hits represented in the full scene;
+- max contact-center error `2.842170943040401e-14`;
+- max surface-radius error `9.894862706971708e-14`;
+- minimum actor distance `0.6800000100096066` for a required `0.46`.
+
+Direct Canvas snapshots covered both user-reported failure windows:
+
+- `00:00–03`: `37/37` events represented;
+- `00:18–22`: `62/62` events represented.
+
+The visual pass led to bounded rail look-ahead/trail, event-timed contact reveal, shorter dense-event lines, smoothed sustained anchors, and C1 slide joints.
+
+Configurable grouping and manual overrides were verified separately with synthetic analyses covering: 0 hits, 1 hit, one role per ball (eight actors), all eight roles merged into one ball, an empty group beside a real one, and custom groups combined with overrides. Under a strong downward tilt the override checks confirmed `x` is byte-identical to the un-tilted scene, remains monotonic, no rhythm ballistic segment sags, and `representedHitCount == sourceHitCount`.
+
+## 10. Decisions and status
+
+| Concern | Current decision | Status |
+|---|---|---|
+| Lightweight analysis | librosa HPSS/multi-band modes | Implemented |
+| Neural instrument identity | Demucs `htdemucs_6s` + presence gate | Implemented |
+| Continuous role data | optional 10 Hz Q8 `roleSignals` | Implemented |
+| Event preservation | one-to-one after analyzer acceptance | Implemented |
+| Live arrangement/solver | target-first 1–3 actor race | Implemented |
+| Unsupported motion | exact constant-gravity ballistic solve | Implemented |
+| Sustains | neural-activity cubic rails | Implemented |
+| Rendering | deterministic sparse Canvas 2D | Implemented in web |
+| Camera | centroid + look-ahead + fit zoom | Implemented |
+| Actor grouping | user-configurable, default rhythm/bass/lead | Implemented |
+| Manual layout | per-actor y-offset + shear tilt | Implemented |
+| Export parity | reuse `scene2d` from Node exporter | Pending integration |
+
+## 11. Superseded architecture
+
+The following are historical and must not be treated as current requirements:
+
+- neural stems as a future-only option;
+- capped “busiest roles” in fixed lanes;
+- 190 ms impulse motion and always-visible colored paths;
+- section-cue glides that replace real onset reactions;
+- detached impact rings, in-canvas role labels, mandatory particles/shake;
+- the removed R3F/Three.js ride and terrain scene.
+
+The accepted aesthetic is sparse physical causality, not visualizer ornamentation.
+
+## 12. Key files
+
+- `packages/types/src/data-contracts.ts` — canonical contracts and role order.
+- `packages/note-extractor/python/extract_events.py` — lightweight analyzer/features/cues.
+- `packages/note-extractor/python/extract_stems.py` — Demucs events + role signals.
+- `packages/note-extractor/src/audio-events.ts` — validation and conversion.
+- `packages/cli/src/pipeline.ts` — orchestration and summaries.
+- `packages/web/src/client/src/scene2d/model.ts` — race planning and sampling.
+- `packages/web/src/client/src/scene2d/render.ts` — geometry, actors, camera.
+- `packages/web/src/client/src/scene2d/types.ts` — renderer/model types and `Ctx2D`.
+- `packages/web/src/client/src/scene2d/settings.ts` — `Scene2DSettings`, actor groups, overrides.
+- `packages/web/src/client/src/components/LiveScene.tsx` — browser loop/audio clock.
+- `packages/web/src/client/src/components/RideControls.tsx` — grouping editor + per-actor sliders.
+- `packages/renderer/src/stream-render.ts` — legacy Node video renderer.
+- `docs/AUDIO_ANALYSIS.md` — detailed analyzer reference.

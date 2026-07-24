@@ -109,8 +109,8 @@ export function LiveScene({
   return (
     <div className="card live-card">
       <div className="live-header">
-        <h2>Live Visualizer</h2>
-        <span className="live-badge">2D · beat-synced</span>
+        <h2>Neural Physics Race</h2>
+        <span className="live-badge">2D · backward-solved</span>
       </div>
 
       <div className="live-canvas-wrap" ref={wrapRef}>
@@ -118,7 +118,8 @@ export function LiveScene({
         {result === null && <div className="live-overlay">Loading choreography…</div>}
         {showEmpty && (
           <div className="live-overlay">
-            No instrument tracks to show. Try <code>--mode stems</code> or enable more instruments below.
+            No instrument tracks to show. Enable instruments below, or if you customized
+            the ball groupings, open “Edit groupings” and choose “Reset to default”.
           </div>
         )}
       </div>

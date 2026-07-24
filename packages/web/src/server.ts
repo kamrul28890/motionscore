@@ -393,10 +393,30 @@ app.post('/api/generate', upload.single('file'), async (req: Request, res: Respo
 
     job.inputType = inputType;
 
+    // Auto-prefer neural stems for audio when a GPU is available: real
+    // per-instrument roles make far more of the music visible than the librosa
+    // heuristic. Falls back to the heuristic (auto->smart) on CPU-only or if the
+    // probe fails, so nobody waits minutes for a slow CPU separation.
+    let effectiveMode = mode;
+    if (inputType === 'audio' && mode === 'auto') {
+      try {
+        const { detectStemsGpuAvailable } = await import('@motionscore/cli');
+        if (await detectStemsGpuAvailable()) {
+          effectiveMode = 'stems';
+          emitToJob(job, {
+            message: 'GPU detected — using neural per-instrument separation (stems)',
+            percent: 6,
+          });
+        }
+      } catch {
+        /* keep auto/smart on any probe failure */
+      }
+    }
+
     const options: CLIOptions = {
       input: inputPath,
       output: outputPath,
-      mode,
+      mode: effectiveMode,
       balls,
       fps,
       width,

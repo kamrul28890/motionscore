@@ -841,6 +841,31 @@ body {
   display: inline-block;
 }
 
+.rc-actor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.35rem 0;
+}
+
+.rc-actor + .rc-actor {
+  border-top: 1px solid var(--border);
+}
+
+.rc-actor-toggle {
+  align-self: flex-start;
+  font-weight: 600;
+}
+
+.rc-actor .rc-roles {
+  padding-left: 1rem;
+}
+
+.rc-subchip {
+  font-size: 0.72rem;
+  padding: 0.12rem 0.45rem;
+}
+
 .rc-slider {
   display: grid;
   grid-template-columns: 8.5rem 1fr 2.6rem;
@@ -871,4 +896,107 @@ body {
 
 .rc-check input {
   accent-color: var(--accent);
+}
+
+.rc-hint {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  margin: -0.1rem 0 0.1rem;
+}
+
+/* Per-actor spatial controls */
+.rc-overrides {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding-left: 1rem;
+  margin-top: 0.2rem;
+}
+
+.rc-slider-row {
+  display: grid;
+  grid-template-columns: 5rem 1fr 2.6rem;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+}
+
+.rc-slider-row input[type='range'] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.rc-slider-label {
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+/* Group editor */
+.rc-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-top: 0.3rem;
+}
+
+.rc-editor-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.rc-editor-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.rc-editor-name {
+  flex: 1;
+  font-size: 0.82rem;
+  padding: 0.2rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-card);
+  color: var(--text-primary);
+}
+
+.rc-color-pick {
+  width: 1.6rem;
+  height: 1.6rem;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.rc-chip-danger {
+  color: #e03131 !important;
+  border-color: #e03131 !important;
+  font-weight: 700;
+  font-size: 1rem;
+  padding: 0.05rem 0.45rem;
+}
+
+.rc-chip-active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.rc-chip-dim {
+  opacity: 0.35;
+}
+
+.rc-editor-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
 }

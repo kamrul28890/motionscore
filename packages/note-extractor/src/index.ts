@@ -20,6 +20,7 @@ import { transcribeAudio } from './transcribe.js';
 import {
   analyzeAudioEvents,
   extractAudioEvents,
+  detectStemsGpuAvailable,
   type AudioEventExtractionMode,
   type BeatExtractionMode,
 } from './audio-events.js';
@@ -38,6 +39,7 @@ export { transcribeAudio };
 export {
   analyzeAudioEvents,
   extractAudioEvents,
+  detectStemsGpuAvailable,
   type AudioEventExtractionMode,
   type BeatExtractionMode,
 };

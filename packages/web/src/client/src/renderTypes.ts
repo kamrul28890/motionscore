@@ -41,6 +41,24 @@ export interface AudioFeatureFrame {
   percussiveEnergy: number;
 }
 
+export type PitchDirection = -1 | 0 | 1;
+export type SustainSpan = [startFrame: number, endFrame: number];
+
+export interface RoleSignalTrack {
+  role: HitRole;
+  activityQ8: number[];
+  sustainSpans: SustainSpan[];
+  pitchDirection?: PitchDirection[];
+  pitchCoverageQ8?: number;
+}
+
+export interface RoleSignals {
+  version: 1;
+  frameRateHz: number;
+  frameCount: number;
+  tracks: RoleSignalTrack[];
+}
+
 export interface SectionCue {
   type: 'build' | 'drop' | 'breakdown' | 'rise' | 'fall';
   startSec: number;
@@ -59,6 +77,7 @@ export interface AudioAnalysis {
   hits: NoteEvent[];
   featureFrames: AudioFeatureFrame[];
   sectionCues: SectionCue[];
+  roleSignals?: RoleSignals;
 }
 
 // --- Choreography (optional for the Line Rider renderer; kept for parity) ---

@@ -122,20 +122,40 @@ function summarizeAnalysis(analysis: AudioAnalysis): AudioAnalysisSummary {
     guitar: new Array<number>(ROLE_ACTIVITY_BINS).fill(0),
   };
 
-  // Bin each roled hit by its onset time, accumulating velocity, so the UI can
-  // show when each instrument is active over the song.
+  // Counts always come from exact onsets. In stems mode, temporal activity comes
+  // from the separated waveform, so held vocals/guitar remain visible between
+  // attacks; legacy analyzers retain the onset-density fallback.
   const durationSec = analysis.durationSec > 0 ? analysis.durationSec : 0;
+  const hasRoleSignals = analysis.roleSignals !== undefined;
   for (const hit of analysis.hits) {
-    if (hit.role === undefined) {
-      continue;
-    }
+    if (hit.role === undefined) continue;
     roleCounts[hit.role] += 1;
+    if (hasRoleSignals) continue;
     const frac = durationSec > 0 ? hit.startSec / durationSec : 0;
     const bin = Math.max(
       0,
       Math.min(ROLE_ACTIVITY_BINS - 1, Math.floor(frac * ROLE_ACTIVITY_BINS)),
     );
     roleActivity[hit.role]![bin]! += hit.velocity > 0 ? hit.velocity : 1;
+  }
+
+  if (analysis.roleSignals !== undefined) {
+    for (const track of analysis.roleSignals.tracks) {
+      const bins = roleActivity[track.role]!;
+      const sampleCounts = new Array<number>(ROLE_ACTIVITY_BINS).fill(0);
+      const lastFrame = Math.max(1, track.activityQ8.length - 1);
+      for (let index = 0; index < track.activityQ8.length; index += 1) {
+        const bin = Math.min(
+          ROLE_ACTIVITY_BINS - 1,
+          Math.floor((index / lastFrame) * ROLE_ACTIVITY_BINS),
+        );
+        bins[bin]! += track.activityQ8[index]! / 255;
+        sampleCounts[bin]! += 1;
+      }
+      for (let index = 0; index < bins.length; index += 1) {
+        if (sampleCounts[index]! > 0) bins[index] = bins[index]! / sampleCounts[index]!;
+      }
+    }
   }
 
   // Normalize each role against its own peak bin: the strip reveals an
