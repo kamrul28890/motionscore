@@ -1,27 +1,33 @@
 import { useState } from 'react';
 import {
-  ACTOR_GROUPS,
-  ACTOR_COLOR_PALETTE,
+  DEFAULT_ROLE_ACTORS,
   DEFAULT_ACTOR_OVERRIDE,
   type ActorGroupConfig,
   type ActorOverride,
   type Scene2DSettings,
 } from '../scene2d/index.js';
-import { ROLE_LABELS } from '../roleMeta.js';
+import { ROLE_COLORS, ROLE_LABELS } from '../roleMeta.js';
 import type { HitRole } from '../App.js';
-
-const ALL_ROLES: readonly HitRole[] = [
-  'kick', 'snare', 'percussion', 'bass', 'melodic', 'piano', 'guitar', 'vocal',
-];
+import type { ActorKind } from '../scene2d/index.js';
 
 interface RideControlsProps {
   settings: Scene2DSettings;
   onChange: (next: Scene2DSettings) => void;
 }
 
+const LEAD_ROLES: ReadonlySet<HitRole> = new Set(['melodic', 'piano', 'guitar', 'vocal']);
+
+/** Physics family for a ball from the sounds it contains (matches the planner). */
+function kindForRoles(roles: readonly HitRole[]): ActorKind {
+  if (roles.some((r) => LEAD_ROLES.has(r))) return 'lead';
+  if (roles.includes('bass')) return 'bass';
+  return 'rhythm';
+}
+
+/** The current groups: custom if set, otherwise the one-ball-per-sound default. */
 function effectiveGroups(settings: Scene2DSettings): ActorGroupConfig[] {
-  if (settings.actorGroups?.length) return settings.actorGroups;
-  return ACTOR_GROUPS.map((g) => ({
+  const source = settings.actorGroups?.length ? settings.actorGroups : DEFAULT_ROLE_ACTORS;
+  return source.map((g) => ({
     id: g.id,
     kind: g.kind,
     label: g.label,
@@ -35,100 +41,143 @@ function getOverride(settings: Scene2DSettings, id: string): ActorOverride {
 }
 
 /**
- * Full scene controls: configurable actor groups (which roles go into which
- * ball), per-actor Y-offset and rotation sliders, and per-role visibility.
+ * Scene controls. Default is one ball per sound (named/coloured by the sound).
+ * Drag a sound chip from one ball into another ball's box to group them, or onto
+ * the "New ball" zone to split it out. Each ball also has show/hide and manual
+ * vertical-offset / rotation.
  */
 export function RideControls({ settings, onChange }: RideControlsProps) {
-  const [editingGroups, setEditingGroups] = useState(false);
+  const [dragRole, setDragRole] = useState<HitRole | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
   const groups = effectiveGroups(settings);
 
-  // --- Actor group toggle (quick on/off) ---
-  const setRoles = (roles: readonly HitRole[], value: boolean): void => {
+  const updateGroups = (next: ActorGroupConfig[]): void => {
+    // Drop empty balls and keep kinds in sync with their contents.
+    const cleaned = next
+      .filter((g) => g.roles.length > 0)
+      .map((g) => ({ ...g, kind: kindForRoles(g.roles) }));
+    onChange({ ...settings, actorGroups: cleaned });
+  };
+
+  const setRolesVisible = (roles: readonly HitRole[], value: boolean): void => {
     const roleVisible = { ...settings.roleVisible };
     for (const role of roles) roleVisible[role] = value;
     onChange({ ...settings, roleVisible });
   };
 
-  // --- Per-actor override ---
   const setOverride = (id: string, patch: Partial<ActorOverride>): void => {
     const current = getOverride(settings, id);
-    const next = { ...current, ...patch };
     onChange({
       ...settings,
-      actorOverrides: { ...(settings.actorOverrides ?? {}), [id]: next },
+      actorOverrides: { ...(settings.actorOverrides ?? {}), [id]: { ...current, ...patch } },
     });
   };
 
-  // --- Group editor helpers ---
-  const updateGroups = (next: ActorGroupConfig[]): void => {
-    onChange({ ...settings, actorGroups: next });
-  };
-
-  const addGroup = (): void => {
-    const idx = groups.length;
-    const color = ACTOR_COLOR_PALETTE[idx % ACTOR_COLOR_PALETTE.length]!;
-    updateGroups([
-      ...groups,
-      { id: `custom-${Date.now()}`, kind: 'lead', label: `Ball ${idx + 1}`, color, roles: [] },
-    ]);
-  };
-
-  const removeGroup = (id: string): void => {
-    updateGroups(groups.filter((g) => g.id !== id));
-  };
-
-  const setGroupLabel = (id: string, label: string): void => {
+  const setLabel = (id: string, label: string): void =>
     updateGroups(groups.map((g) => (g.id === id ? { ...g, label } : g)));
-  };
-
-  const setGroupColor = (id: string, color: string): void => {
+  const setColor = (id: string, color: string): void =>
     updateGroups(groups.map((g) => (g.id === id ? { ...g, color } : g)));
-  };
 
-  const toggleGroupRole = (groupId: string, role: HitRole): void => {
+  const moveRoleToGroup = (role: HitRole, targetId: string): void => {
+    const stripped = groups.map((g) => ({ ...g, roles: g.roles.filter((r) => r !== role) }));
     updateGroups(
-      groups.map((g) => {
-        if (g.id !== groupId) {
-          // Remove from any other group that has it (one role per ball)
-          return { ...g, roles: g.roles.filter((r) => r !== role) };
-        }
-        const has = g.roles.includes(role);
-        return { ...g, roles: has ? g.roles.filter((r) => r !== role) : [...g.roles, role] };
-      }),
+      stripped.map((g) => (g.id === targetId ? { ...g, roles: [...g.roles, role] } : g)),
     );
   };
 
-  const resetGroups = (): void => {
+  const moveRoleToNewBall = (role: HitRole): void => {
+    const stripped = groups.map((g) => ({ ...g, roles: g.roles.filter((r) => r !== role) }));
+    stripped.push({
+      id: `ball-${role}-${Date.now()}`,
+      kind: kindForRoles([role]),
+      label: ROLE_LABELS[role],
+      color: ROLE_COLORS[role],
+      roles: [role],
+    });
+    updateGroups(stripped);
+  };
+
+  const resetToDefault = (): void =>
     onChange({ ...settings, actorGroups: undefined, actorOverrides: undefined });
+
+  const handleDrop = (targetId: string | 'new'): void => {
+    if (!dragRole) return;
+    if (targetId === 'new') moveRoleToNewBall(dragRole);
+    else moveRoleToGroup(dragRole, targetId);
+    setDragRole(null);
+    setDropTarget(null);
   };
 
   return (
     <details className="ride-controls" open>
       <summary>Scene controls</summary>
       <div className="ride-controls-body">
-        {/* Quick ball toggles + per-actor sliders */}
-        <div className="rc-group">
-          <span className="rc-label">Balls</span>
+        <p className="rc-hint">
+          One ball per sound. Drag a sound into another ball to group them, or onto
+          &ldquo;New ball&rdquo; to split it out. Toggle a ball to show/hide it.
+        </p>
+
+        <div className="rc-balls">
           {groups.map((group) => {
             const actorOn = group.roles.some((r) => settings.roleVisible[r]);
             const override = getOverride(settings, group.id);
             return (
-              <div className="rc-actor" key={group.id}>
-                <button
-                  type="button"
-                  className={`rc-chip rc-actor-toggle${actorOn ? '' : ' rc-chip-off'}`}
-                  onClick={() => setRoles(group.roles, !actorOn)}
-                  aria-pressed={actorOn}
-                  style={actorOn ? { borderColor: group.color, color: group.color } : undefined}
-                >
+              <div
+                key={group.id}
+                className={`rc-ball${dropTarget === group.id ? ' rc-ball-drop' : ''}`}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  if (dropTarget !== group.id) setDropTarget(group.id);
+                }}
+                onDragLeave={() => setDropTarget((cur) => (cur === group.id ? null : cur))}
+                onDrop={() => handleDrop(group.id)}
+              >
+                <div className="rc-ball-head">
                   <span className="rc-swatch" style={{ background: group.color }} />
-                  {group.label}
-                </button>
+                  <input
+                    className="rc-ball-name"
+                    type="text"
+                    value={group.label}
+                    onChange={(e) => setLabel(group.id, e.target.value)}
+                    aria-label="Ball name"
+                  />
+                  <input
+                    type="color"
+                    className="rc-color-pick"
+                    value={group.color}
+                    onChange={(e) => setColor(group.id, e.target.value)}
+                    aria-label="Ball colour"
+                  />
+                  <button
+                    type="button"
+                    className={`rc-eye${actorOn ? '' : ' rc-eye-off'}`}
+                    onClick={() => setRolesVisible(group.roles, !actorOn)}
+                    aria-pressed={actorOn}
+                    title={actorOn ? 'Hide ball' : 'Show ball'}
+                  >
+                    {actorOn ? 'shown' : 'hidden'}
+                  </button>
+                </div>
 
-                {/* Per-actor spatial controls */}
+                <div className="rc-ball-roles">
+                  {group.roles.map((role) => (
+                    <span
+                      key={role}
+                      className="rc-chip rc-role-chip"
+                      draggable
+                      onDragStart={() => setDragRole(role)}
+                      onDragEnd={() => { setDragRole(null); setDropTarget(null); }}
+                      style={{ borderColor: ROLE_COLORS[role] }}
+                    >
+                      <span className="rc-swatch rc-swatch-sm" style={{ background: ROLE_COLORS[role] }} />
+                      {ROLE_LABELS[role]}
+                    </span>
+                  ))}
+                </div>
+
                 <div className="rc-overrides">
                   <label className="rc-slider-row">
-                    <span className="rc-slider-label">Y offset</span>
+                    <span className="rc-slider-label">Height</span>
                     <input
                       type="range"
                       min={-8}
@@ -140,7 +189,7 @@ export function RideControls({ settings, onChange }: RideControlsProps) {
                     <span className="rc-val">{override.yOffset.toFixed(1)}</span>
                   </label>
                   <label className="rc-slider-row">
-                    <span className="rc-slider-label">Rotation</span>
+                    <span className="rc-slider-label">Tilt</span>
                     <input
                       type="range"
                       min={-15}
@@ -155,79 +204,23 @@ export function RideControls({ settings, onChange }: RideControlsProps) {
               </div>
             );
           })}
-        </div>
 
-        {/* Group editor */}
-        <div className="rc-group">
-          <button
-            type="button"
-            className="rc-chip"
-            onClick={() => setEditingGroups(!editingGroups)}
+          <div
+            className={`rc-new-ball${dropTarget === 'new' ? ' rc-ball-drop' : ''}`}
+            onDragOver={(e) => {
+              e.preventDefault();
+              if (dropTarget !== 'new') setDropTarget('new');
+            }}
+            onDragLeave={() => setDropTarget((cur) => (cur === 'new' ? null : cur))}
+            onDrop={() => handleDrop('new')}
           >
-            {editingGroups ? 'Done editing' : 'Edit groupings'}
-          </button>
-
-          {editingGroups && (
-            <div className="rc-editor">
-              <p className="rc-hint">
-                Assign which instruments go into which ball. A role can only belong to one ball.
-              </p>
-              {groups.map((group) => (
-                <div className="rc-editor-group" key={group.id}>
-                  <div className="rc-editor-header">
-                    <input
-                      className="rc-editor-name"
-                      type="text"
-                      value={group.label}
-                      onChange={(e) => setGroupLabel(group.id, e.target.value)}
-                      aria-label="Ball name"
-                    />
-                    <input
-                      type="color"
-                      value={group.color}
-                      onChange={(e) => setGroupColor(group.id, e.target.value)}
-                      className="rc-color-pick"
-                      aria-label="Ball color"
-                    />
-                    <button
-                      type="button"
-                      className="rc-chip rc-chip-danger"
-                      onClick={() => removeGroup(group.id)}
-                      aria-label={`Remove ${group.label}`}
-                    >
-                      &times;
-                    </button>
-                  </div>
-                  <div className="rc-roles">
-                    {ALL_ROLES.map((role) => {
-                      const inThis = group.roles.includes(role);
-                      const inOther = !inThis && groups.some((g) => g.id !== group.id && g.roles.includes(role));
-                      return (
-                        <button
-                          key={role}
-                          type="button"
-                          className={`rc-chip rc-subchip${inThis ? ' rc-chip-active' : ''}${inOther ? ' rc-chip-dim' : ''}`}
-                          onClick={() => toggleGroupRole(group.id, role)}
-                          aria-pressed={inThis}
-                        >
-                          {ROLE_LABELS[role]}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              ))}
-              <div className="rc-editor-actions">
-                <button type="button" className="rc-chip" onClick={addGroup}>
-                  + Add ball
-                </button>
-                <button type="button" className="rc-chip" onClick={resetGroups}>
-                  Reset to default
-                </button>
-              </div>
-            </div>
-          )}
+            + New ball (drop a sound here)
+          </div>
         </div>
+
+        <button type="button" className="rc-chip rc-reset" onClick={resetToDefault}>
+          Reset to one ball per sound
+        </button>
       </div>
     </details>
   );

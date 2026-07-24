@@ -112,6 +112,9 @@ export interface Actor {
   segments: RaceSegment[];
   /** Sorted physical contact times for impact squash lookup. */
   hitTimes: Float64Array;
+  /** Time range where this actor has real content; it is idle/hidden outside. */
+  activeStartSec: number;
+  activeEndSec: number;
 }
 
 export interface Scene2DModel {

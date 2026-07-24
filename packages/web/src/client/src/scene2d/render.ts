@@ -79,9 +79,12 @@ function quantileSorted(sorted: number[], q: number): number {
  * cap and a raised minimum scale are hard backstops so the view can never zoom
  * out to an unreadable postage stamp regardless of ball count.
  */
+function isActorActive(actor: Actor, timeSec: number): boolean {
+  return timeSec >= actor.activeStartSec && timeSec <= actor.activeEndSec;
+}
+
 function updateCamera(model: Scene2DModel, frame: RenderFrame): void {
   const { camera, timeSec, dt, width, height } = frame;
-  const actorCount = Math.max(1, model.actors.length);
   const samples = 30;
   const t0 = Math.max(0, timeSec - LOOK_BEHIND_SEC);
   const t1 = Math.min(model.durationSec, timeSec + LOOK_AHEAD_SEC);
@@ -89,15 +92,22 @@ function updateCamera(model: Scene2DModel, frame: RenderFrame): void {
 
   let currentXSum = 0;
   let futureXSum = 0;
+  let activeCount = 0;
   let minX = Number.POSITIVE_INFINITY;
   let maxX = Number.NEGATIVE_INFINITY;
   const ys: number[] = [];
 
+  // Only actors that are currently active are framed. An idle actor (before its
+  // first note or after its last) must not drag the camera toward an empty
+  // region of the world.
   for (const actor of model.actors) {
+    if (!isActorActive(actor, timeSec)) continue;
+    activeCount += 1;
     currentXSum += sampleActor(actor, timeSec).x;
     futureXSum += sampleActor(actor, futureTime).x;
     for (let index = 0; index <= samples; index += 1) {
       const sampleTime = t0 + ((t1 - t0) * index) / samples;
+      if (!isActorActive(actor, sampleTime)) continue;
       const point = sampleActor(actor, sampleTime);
       if (point.x < minX) minX = point.x;
       if (point.x > maxX) maxX = point.x;
@@ -105,6 +115,18 @@ function updateCamera(model: Scene2DModel, frame: RenderFrame): void {
     }
   }
 
+  // If nothing is active right now (a gap between sections), fall back to all
+  // actors so the camera holds a sensible position instead of jumping.
+  if (activeCount === 0) {
+    for (const actor of model.actors) {
+      currentXSum += sampleActor(actor, timeSec).x;
+      futureXSum += sampleActor(actor, futureTime).x;
+      ys.push(sampleActor(actor, timeSec).y);
+    }
+    activeCount = Math.max(1, model.actors.length);
+  }
+
+  const actorCount = Math.max(1, activeCount);
   const currentCentroidX = currentXSum / actorCount;
   const futureCentroidX = futureXSum / actorCount;
 
@@ -300,17 +322,33 @@ function drawContact(
   ctx.globalAlpha = alpha;
   ctx.beginPath();
   if (contact.style === 'catch') {
-    const depth = BALL_R * (1.25 + contact.strength);
-    ctx.moveTo(
-      left.x + contact.normal.x * depth,
-      left.y + contact.normal.y * depth,
-    );
-    ctx.quadraticCurveTo(
-      contact.surfacePoint.x,
-      contact.surfacePoint.y,
-      right.x + contact.normal.x * depth,
-      right.y + contact.normal.y * depth,
-    );
+    // A concave-up cradle the ball drops INTO: rims rise toward the ball
+    // (-normal) on both sides and the curve dips to a rounded valley at the
+    // contact point. `normal` points from the ball toward the surface, so the
+    // rims must be lifted along -normal; lifting along +normal (as before) put
+    // the rims below the contact and made an upside-down arch.
+    const rim = BALL_R * (0.9 + contact.strength);
+    const half = contact.lineLength / 2;
+    const start = {
+      x: left.x - contact.normal.x * rim,
+      y: left.y - contact.normal.y * rim,
+    };
+    const end = {
+      x: right.x - contact.normal.x * rim,
+      y: right.y - contact.normal.y * rim,
+    };
+    // Control points at the bowl floor (the contact), spread along the tangent,
+    // pulling the middle down into a smooth U.
+    const c1 = {
+      x: contact.surfacePoint.x - contact.tangent.x * half * 0.5,
+      y: contact.surfacePoint.y - contact.tangent.y * half * 0.5,
+    };
+    const c2 = {
+      x: contact.surfacePoint.x + contact.tangent.x * half * 0.5,
+      y: contact.surfacePoint.y + contact.tangent.y * half * 0.5,
+    };
+    ctx.moveTo(start.x, start.y);
+    ctx.bezierCurveTo(c1.x, c1.y, c2.x, c2.y, end.x, end.y);
   } else {
     ctx.moveTo(left.x, left.y);
     ctx.lineTo(right.x, right.y);
@@ -417,6 +455,7 @@ export function renderScene2D(ctx: Ctx2D, model: Scene2DModel, frame: RenderFram
   // short look-ahead so the rail reads as terrain without exposing the whole
   // future phrase as a visualizer trace.
   for (const actor of model.actors) {
+    if (!isActorActive(actor, timeSec)) continue;
     for (const segment of actor.segments) {
       if (segment.kind !== 'slide') continue;
       if (
@@ -439,6 +478,7 @@ export function renderScene2D(ctx: Ctx2D, model: Scene2DModel, frame: RenderFram
   // A physical impact line reveals with its neural onset, then falls behind the
   // race. No event is filtered: every contact becomes visible at its own time.
   for (const actor of model.actors) {
+    if (!isActorActive(actor, timeSec)) continue;
     for (const contact of actor.contacts) {
       const alpha = temporalContactAlpha(contact, timeSec);
       if (alpha <= 0) continue;
@@ -450,6 +490,8 @@ export function renderScene2D(ctx: Ctx2D, model: Scene2DModel, frame: RenderFram
   }
 
   // Actors are last so their collision/squash remains legible over black track.
-  for (const actor of model.actors) drawBall(ctx, actor, timeSec, scale);
+  for (const actor of model.actors) {
+    if (isActorActive(actor, timeSec)) drawBall(ctx, actor, timeSec, scale);
+  }
   ctx.globalAlpha = 1;
 }

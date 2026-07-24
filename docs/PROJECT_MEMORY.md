@@ -23,22 +23,25 @@ MotionScore turns MIDI or analyzed audio into synchronized physical animation. I
 
 ### Deterministic 2D race planner
 
-`packages/web/src/client/src/scene2d/model.ts` consumes the complete `AudioAnalysis` and builds semantically recognizable actors. The default grouping is three actors:
+`packages/web/src/client/src/scene2d/model.ts` consumes the complete `AudioAnalysis` and builds semantically recognizable actors. The default grouping is now ONE BALL PER SOUND (`DEFAULT_ROLE_ACTORS`): each present role is its own actor, named by the sound (Kick, Snare, Percussion, Bass, Melody, Piano, Guitar, Vocals) and tinted its distinct role colour. Physics `kind` per role: kick/snare/percussion=rhythm (bounce), bass=bass, melodic/piano/guitar/vocal=lead (rails/swell).
 
-- `rhythm`: kick + snare + percussion;
-- `bass`: bass;
-- `lead`: melodic + piano + guitar + vocal.
+This default is overridable: `settings.actorGroups` can define any grouping from one ball per sound (up to eight) to a single ball fed by all sounds. On a merge the ball's `kind` is recomputed (lead if any pitched role, else bass, else rhythm). Only groups with enabled notes or sustained activity (≥0.3, so bleed-only roles are excluded) exist. The planner preserves every enabled hit, merging only exactly co-timed notes within one group into one contact with multiple `noteIds`.
 
-This default is overridable: `settings.actorGroups` can define any grouping from one ball per role (up to eight) to a single ball fed by all roles. Only groups with enabled notes or signal activity exist. The planner preserves every enabled hit, merging only exactly co-timed notes within one group into one contact with multiple `noteIds`.
+`RideControls` is now a drag-and-drop UI: each ball is a box; drag a sound chip into another ball to group, onto "New ball" to split; per-ball name (defaults to the sound, never a number), colour, show/hide, and height/tilt sliders; "Reset to one ball per sound".
+
+Each actor also has an active time range (`activeStartSec`/`activeEndSec` = first→last contact/support). `createAnchors` clips the timeline to it and the renderer skips an actor outside it, so a late-entering sound (e.g. a vocal starting at 0:21) is simply absent during the intro instead of bouncing on empty paper.
 
 The music fixes where each actor must be at each timestamp; motion is then solved backward to justify those targets:
 
 - horizontal progress is monotonic (`SCROLL_X = 6`) with a small actor-specific race bias;
 - anchors descend through the world (`DRIFT_Y = 0.72`);
-- unsupported intervals are exact constant-gravity ballistic segments (`GRAVITY = 18`, `BALL_R = 0.23`);
+- silence is BOUNDED per family: RHYTHM subdivides long unsupported gaps (`createAnchors`, cap `max(beatSec*2,0.95)s`) into short low hops (apex ~g·dt²/8 ≈ ≤2 — fixed the "percussion teleports up" defect, apex was ~7); PITCHED keeps ONE freefall arc per gap with reduced per-segment gravity `min(GRAVITY, 8·APEX_MAX_PITCHED/dt²)` (APEX_MAX_PITCHED=10) so a rest flies up dramatically and returns, never a string of invisible bounces and never to infinity; freefall `depth` still eases to a bounded rest offset;
+- late-entry clipping: an actor is only sampled/drawn within `activeStartSec..activeEndSec`, so a vocal that starts at 0:21 is absent (not bouncing on empty paper) during the intro;
+- dynamics drive motion: pitched actors map pitch height to vertical position (coeff `0.1`) and SURGE upward undamped by `SUSTAIN_SWELL_LIFT(4.5)*(activity-0.35)` during sustained high neural activity, so a held loud/high vocal reacts strongly (~8 units) instead of gliding flat;
+- unsupported intervals are constant-gravity ballistic segments (`GRAVITY = 18`, `BALL_R = 0.23`), apex-bounded as above;
 - neural sustain spans become supported cubic rails, with pitch direction influencing slope;
 - rapid onsets become compact descending steps instead of deleting events;
-- rests end the track and leave the actor in freefall;
+- rests end the track and leave the actor in a bounded freefall arc;
 - the strongest shared musical moment in each phrase drives deterministic convergence/crossover shaping;
 - contact tangent/normal comes from sampled incoming/outgoing velocity, so hit lines physically explain the collision;
 - static X bias plus deterministic separation adjustment prevents accidental ball overlap while retaining intentional visual crossings.
@@ -113,6 +116,7 @@ For a fresh Gary Moore evidence run, temporary scripts/snapshots can recreate th
 2. Heuristic `smart`/`beats`/`onsets` role names remain frequency-band estimates. Use `stems` for instrument identity.
 3. Section cues are heuristic structural hints; the current race uses neural contacts/activity as primary truth and tolerates noisy cue overlap.
 4. Tune physical/framing magnitudes only after viewing more songs. Do not reintroduce event thinning or count caps as a visual cleanup shortcut.
+5. Per-stem audio enable/disable (mute a sound when its ball is hidden) — ASSESSED, proposed, not built. See `ARCHITECTURE.md` §13. Requires: `extract_stems.py` writing the 6 accepted Demucs stems as compressed mono files; server `GET /api/stem/:jobId/:name` + stem list in `/api/result` + cleanup; a client Web Audio engine (one `AudioContext`, one `GainNode` per stem, context-clock transport replacing the single `<audio>`). HARD LIMIT: kick/snare/percussion share the one `drums` stem, so audio muting is per-stem (Drums grouped, Bass, Melody/other, Vocals, Guitar, Piano), not per drum-role. Gated on user go-ahead because audio sync/quality is not headless-verifiable.
 
 ## Superseded designs
 

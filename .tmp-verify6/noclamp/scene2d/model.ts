@@ -38,12 +38,10 @@ const GROUP_GAP = 2.2;
 const RACE_X_GAP = 0.68;
 /** Upward surge (world units) at full sustained neural activity for pitched actors. */
 const SUSTAIN_SWELL_LIFT = 4.5;
-/**
- * Peak height (world units) a pitched freefall arc may reach over a long rest.
- * A long gap keeps ONE dramatic arc (the ball flies up and returns) but its
- * gravity is reduced so it never escapes to infinity.
- */
-const APEX_MAX_PITCHED = 10;
+/** Max deviation (world units) of an unsupported pitched arc from its chord. Bounds silence arcs. */
+const MAX_UNSUPPORTED_BULGE = 7;
+/** Max |vertical/horizontal| slope allowed between consecutive rhythm contacts (prevents near-vertical "teleport"). */
+const RHYTHM_MAX_RISE_SLOPE = 2;
 const CONTACT_STACK_GAP = BALL_R * 2.8;
 const EXACT_TIME_EPSILON = 1e-6;
 const Q8 = 255;
@@ -85,35 +83,6 @@ export const ACTOR_GROUPS: readonly GroupDefinition[] = [
     roles: ['melodic', 'piano', 'guitar', 'vocal'],
   },
 ];
-
-/** Default physics family + display name + tint per source role. */
-const ROLE_ACTOR_META: Record<HitRole, { kind: ActorKind; label: string; color: string }> = {
-  kick: { kind: 'rhythm', label: 'Kick', color: '#ff6b6b' },
-  snare: { kind: 'rhythm', label: 'Snare', color: '#ffd43b' },
-  percussion: { kind: 'rhythm', label: 'Percussion', color: '#63e6be' },
-  bass: { kind: 'bass', label: 'Bass', color: '#ffa94d' },
-  melodic: { kind: 'lead', label: 'Melody', color: '#4dabf7' },
-  piano: { kind: 'lead', label: 'Piano', color: '#b197fc' },
-  guitar: { kind: 'lead', label: 'Guitar', color: '#f783ac' },
-  vocal: { kind: 'lead', label: 'Vocals', color: '#a9e34b' },
-};
-
-const ROLE_SEQUENCE: readonly HitRole[] = [
-  'kick', 'snare', 'percussion', 'bass', 'melodic', 'piano', 'guitar', 'vocal',
-];
-
-/**
- * Default grouping: one ball per sound, named and coloured by the sound itself.
- * Users can regroup freely; this is only the starting point when no custom
- * grouping is supplied.
- */
-export const DEFAULT_ROLE_ACTORS: readonly GroupDefinition[] = ROLE_SEQUENCE.map((role) => ({
-  id: role,
-  kind: ROLE_ACTOR_META[role].kind,
-  label: ROLE_ACTOR_META[role].label,
-  color: ROLE_ACTOR_META[role].color,
-  roles: [role],
-}));
 
 interface GroupSignal {
   frameRateHz: number;
@@ -312,10 +281,7 @@ function groupNotes(
 }
 
 function hasSignalActivity(signal: GroupSignal): boolean {
-  // Require a meaningful sustained level, not any non-zero value: separation
-  // bleed sits around 0.1-0.2 and must NOT spawn a phantom actor. A role with
-  // real discrete onsets still spawns via the notes.length check upstream.
-  for (const value of signal.activity) if (value >= 0.3) return true;
+  for (const value of signal.activity) if (value > 0) return true;
   return false;
 }
 
@@ -418,60 +384,26 @@ function rhythmOffset(contact: RaceContact): number {
   return (total / contact.sourceRoles.length) * (0.6 + 0.4 * contact.strength);
 }
 
-interface ActiveRange {
-  startSec: number;
-  endSec: number;
-}
-
-/**
- * The time span where an actor has real content (first→last contact or support
- * boundary). Outside this range the actor is idle and is not sampled/drawn, so
- * a role that only enters mid-song (e.g. a vocal that starts at 0:21) does not
- * bounce on empty paper during the intro.
- */
-function activeRange(
-  contacts: readonly RaceContact[],
-  supportSpans: readonly SupportSpan[],
-): ActiveRange | null {
-  let start = Number.POSITIVE_INFINITY;
-  let end = Number.NEGATIVE_INFINITY;
-  for (const contact of contacts) {
-    start = Math.min(start, contact.timeSec);
-    end = Math.max(end, contact.timeSec);
-  }
-  for (const span of supportSpans) {
-    start = Math.min(start, span.startSec);
-    end = Math.max(end, span.endSec);
-  }
-  if (!Number.isFinite(start)) return null;
-  // A single instantaneous contact still deserves a ball; give it a small span
-  // so it has a valid, non-degenerate time range.
-  if (end <= start) end = start + 0.5;
-  return { startSec: start, endSec: end };
-}
-
 function createAnchors(
   contacts: readonly RaceContact[],
   supportSpans: readonly SupportSpan[],
-  range: ActiveRange,
-  beatSec: number,
-  subdivide: boolean,
+  durationSec: number,
 ): { anchors: Anchor[]; anchorByContact: Map<RaceContact, Anchor> } {
   const raw: Array<{ timeSec: number; contact: RaceContact | null }> = [
-    { timeSec: range.startSec, contact: null },
-    { timeSec: range.endSec, contact: null },
+    { timeSec: 0, contact: null },
+    { timeSec: durationSec, contact: null },
   ];
   for (const contact of contacts) raw.push({ timeSec: contact.timeSec, contact });
   for (const span of supportSpans) {
-    if (span.startSec > range.startSec && span.startSec < range.endSec) raw.push({ timeSec: span.startSec, contact: null });
-    if (span.endSec > range.startSec && span.endSec < range.endSec) raw.push({ timeSec: span.endSec, contact: null });
+    if (span.startSec > 0 && span.startSec < durationSec) raw.push({ timeSec: span.startSec, contact: null });
+    if (span.endSec > 0 && span.endSec < durationSec) raw.push({ timeSec: span.endSec, contact: null });
   }
   raw.sort((a, b) => a.timeSec - b.timeSec || (a.contact ? -1 : 1));
 
-  const deduped: Anchor[] = [];
+  const anchors: Anchor[] = [];
   const anchorByContact = new Map<RaceContact, Anchor>();
   for (const item of raw) {
-    const previous = deduped[deduped.length - 1];
+    const previous = anchors[anchors.length - 1];
     if (previous && Math.abs(previous.timeSec - item.timeSec) <= EXACT_TIME_EPSILON) {
       if (item.contact !== null) {
         previous.contact = item.contact;
@@ -484,36 +416,8 @@ function createAnchors(
       position: { x: 0, y: 0 },
       contact: item.contact,
     };
-    deduped.push(anchor);
+    anchors.push(anchor);
     if (item.contact !== null) anchorByContact.set(item.contact, anchor);
-  }
-
-  // Only BOUNCING (rhythm) actors subdivide long unsupported gaps into a series
-  // of short, low hops. The cap is derived from a target apex (apex = g*dt^2/8),
-  // so a drum silence reads as a settling bounce, never a tall near-vertical
-  // "teleport" hop. Pitched actors deliberately keep a single (gravity-bounded)
-  // freefall arc per gap instead — that is the dramatic fly-up-and-return, not a
-  // string of bounces on empty paper.
-  if (!subdivide) return { anchors: deduped, anchorByContact };
-  const maxBallisticSec = Math.max(beatSec * 2, 0.95);
-  const anchors: Anchor[] = [];
-  for (let index = 0; index < deduped.length; index += 1) {
-    if (index > 0) {
-      const left = deduped[index - 1]!;
-      const right = deduped[index]!;
-      const gap = right.timeSec - left.timeSec;
-      if (gap > maxBallisticSec && !isSupported(supportSpans, left.timeSec, right.timeSec)) {
-        const pieces = Math.ceil(gap / maxBallisticSec);
-        for (let k = 1; k < pieces; k += 1) {
-          anchors.push({
-            timeSec: left.timeSec + (gap * k) / pieces,
-            position: { x: 0, y: 0 },
-            contact: null,
-          });
-        }
-      }
-    }
-    anchors.push(deduped[index]!);
   }
   return { anchors, anchorByContact };
 }
@@ -617,12 +521,15 @@ function planPreliminaryAnchors(
 }
 
 /**
- * Guarantee every rhythm gap is an upward hop. Under one constant downward
- * gravity the arc between two anchors is fully determined, so it only bounces
- * up when the endpoints do not descend faster than the launch can carry the
- * ball: dy <= 0.5*g*dt^2. Applied after all offsets and convergence so no
- * musical bias, rapid staircase, or crossover can invert a bounce into a sag
- * (which would also corrupt the derived contact normal/surface).
+ * Guarantee every rhythm gap is an upward hop AND bound how steeply a contact
+ * can sit above the previous one. Under one constant downward gravity the arc
+ * between two anchors is fully determined, so it only bounces up when the
+ * endpoints do not descend faster than the launch can carry the ball:
+ * dy <= 0.5*g*dt^2. Separately, a contact placed far ABOVE the previous one in a
+ * short time makes a near-vertical chord that reads as a teleport (the reported
+ * percussion jump), so the rise is capped to a maximum slope. Applied after all
+ * offsets and convergence so no musical bias, rapid staircase, or crossover can
+ * invert a bounce into a sag or produce a vertical jump.
  */
 function enforceRhythmHops(anchors: readonly Anchor[]): void {
   const SAFETY = 0.85;
@@ -631,9 +538,14 @@ function enforceRhythmHops(anchors: readonly Anchor[]): void {
     const current = anchors[index]!;
     const dt = current.timeSec - previous.timeSec;
     if (dt <= EXACT_TIME_EPSILON) continue;
-    const hopLimit = 0.5 * GRAVITY * dt * dt * SAFETY;
-    const maxY = previous.position.y + hopLimit;
+    // Descent clamp: no sag (arc always launches upward).
+    const maxY = previous.position.y + 0.5 * GRAVITY * dt * dt * SAFETY;
     if (current.position.y > maxY) current.position.y = maxY;
+    // Ascent clamp: a contact cannot rise faster than a bounded slope over the
+    // horizontal distance travelled, so no near-vertical "teleport".
+    const dx = SCROLL_X * dt;
+    const minY = previous.position.y - RHYTHM_MAX_RISE_SLOPE * dx;
+    if (current.position.y < minY) current.position.y = minY;
   }
 }
 
@@ -815,27 +727,29 @@ function buildSegments(draft: ActorDraft): RaceSegment[] {
       };
       segments.push(slide);
     } else {
-      // Pitched actors keep ONE freefall arc per gap. For a long gap the full
-      // gravity would make the arc rocket up ~0.5*g*dt^2 and plunge, so reduce
-      // this segment's gravity to cap the apex (~APEX_MAX_PITCHED for level
-      // ends) while still hitting p1 exactly at t1. Short hops keep full gravity
-      // because the cap only bites when g*dt^2/8 would exceed the target apex.
-      // Rhythm gaps are already subdivided short, so their gravity stays GRAVITY.
-      const segmentGravity =
+      // A parabola's maximum deviation from the straight chord between its two
+      // endpoints is exactly gravity*dt^2/8. Bounding that "bulge" keeps a long
+      // unsupported gap (a rest) from flying up thousands of units or launching
+      // near-vertically: short gaps keep full gravity and stay crisp; long gaps
+      // get reduced gravity and become ONE gentle bounded arc (no infinite fall,
+      // no bobbing on invisible lines). Rhythm keeps full gravity so its no-sag
+      // bounce guarantee (enforceRhythmHops, which assumes GRAVITY) still holds;
+      // its steepness is bounded by the ascent clamp there instead.
+      const gravity =
         draft.actor.kind === 'rhythm'
           ? GRAVITY
-          : Math.min(GRAVITY, (8 * APEX_MAX_PITCHED) / (duration * duration));
+          : Math.min(GRAVITY, (8 * MAX_UNSUPPORTED_BULGE) / (duration * duration));
       const ballistic: BallisticSegment = {
         kind: 'ballistic',
         t0: left.timeSec,
         t1: right.timeSec,
         p0: left.position,
         p1: right.position,
-        gravity: segmentGravity,
+        gravity,
         velocity0: {
           x: (right.position.x - left.position.x) / duration,
           y:
-            (right.position.y - left.position.y - 0.5 * segmentGravity * duration * duration) /
+            (right.position.y - left.position.y - 0.5 * gravity * duration * duration) /
             duration,
         },
       };
@@ -1098,7 +1012,7 @@ export function buildScene2D(
   const beatSec = beatDuration(analysis);
   const rapidThreshold = beatSec * 0.55;
 
-  // Use custom actor groups from settings, or fall back to one ball per sound.
+  // Use custom actor groups from settings, or fall back to the built-in default.
   const groups: readonly GroupDefinition[] = settings.actorGroups?.length
     ? settings.actorGroups.map((cfg) => ({
         id: cfg.id,
@@ -1107,7 +1021,7 @@ export function buildScene2D(
         color: cfg.color,
         roles: cfg.roles as readonly HitRole[],
       }))
-    : DEFAULT_ROLE_ACTORS;
+    : ACTOR_GROUPS;
 
   const candidates = groups.map((definition) => {
     const notes = groupNotes(analysis, definition, settings);
@@ -1116,40 +1030,29 @@ export function buildScene2D(
   }).filter((candidate) => candidate.notes.length > 0 || hasSignalActivity(candidate.signal));
   if (candidates.length === 0) return empty;
 
-  const prepared = candidates.map((candidate) => {
-    const contacts = buildContacts(candidate.notes, candidate.definition.id, rapidThreshold);
-    const supportSpans = deriveSupportSpans(
-      candidate.signal,
-      candidate.definition.kind,
-      analysis.sectionCues,
-      durationSec,
-      beatSec,
-    );
-    return { ...candidate, contacts, supportSpans, range: activeRange(contacts, supportSpans) };
-  }).filter((candidate): candidate is typeof candidate & { range: ActiveRange } => candidate.range !== null);
-  if (prepared.length === 0) return empty;
-
   const drafts: ActorDraft[] = [];
-  prepared.forEach((candidate, actorIndex) => {
-    const { definition, notes, signal, contacts, supportSpans, range } = candidate;
-    const xBias = (actorIndex - (prepared.length - 1) / 2) * RACE_X_GAP;
+  candidates.forEach((candidate, actorIndex) => {
+    const { definition, notes, signal } = candidate;
+    const xBias = (actorIndex - (candidates.length - 1) / 2) * RACE_X_GAP;
+    const contacts = buildContacts(notes, definition.id, rapidThreshold);
     const sourceRoles = definition.roles.filter(
       (role) =>
         settings.roleVisible[role] &&
         (notes.some((note) => note.role === role) ||
           (trackByRole(analysis).get(role)?.activityQ8.some((value) => value > 0) ?? false)),
     );
-    const { anchors, anchorByContact } = createAnchors(
-      contacts,
-      supportSpans,
-      range,
+    const supportSpans = deriveSupportSpans(
+      signal,
+      definition.kind,
+      analysis.sectionCues,
+      durationSec,
       beatSec,
-      definition.kind === 'rhythm',
     );
+    const { anchors, anchorByContact } = createAnchors(contacts, supportSpans, durationSec);
     planPreliminaryAnchors(
       anchors,
       actorIndex,
-      prepared.length,
+      candidates.length,
       xBias,
       definition.kind,
       contacts,
@@ -1169,8 +1072,6 @@ export function buildScene2D(
       contacts,
       segments: [],
       hitTimes: Float64Array.from(contacts, (contact) => contact.timeSec),
-      activeStartSec: range.startSec,
-      activeEndSec: range.endSec,
     };
     drafts.push({ actor, anchors, anchorByContact, supportSpans, signal, cues: analysis.sectionCues });
   });
@@ -1187,7 +1088,7 @@ export function buildScene2D(
   }
 
   const actors = drafts.map((draft) => draft.actor);
-  const sourceHitCount = prepared.reduce((sum, candidate) => sum + candidate.notes.length, 0);
+  const sourceHitCount = candidates.reduce((sum, candidate) => sum + candidate.notes.length, 0);
   const representedHitCount = actors.reduce(
     (sum, actor) =>
       sum + actor.contacts.reduce((actorSum, contact) => actorSum + contact.noteIds.length, 0),

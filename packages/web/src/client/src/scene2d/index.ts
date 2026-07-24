@@ -20,6 +20,7 @@ export {
   sampleRaceSegment,
   sampleRaceVelocity,
   ACTOR_GROUPS,
+  DEFAULT_ROLE_ACTORS,
   type GroupDefinition,
   SCROLL_X,
   DRIFT_Y,

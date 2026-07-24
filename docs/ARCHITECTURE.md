@@ -120,17 +120,17 @@ The live scene combines arrangement and trajectory solving in `packages/web/src/
 
 ### 5.1 Actor selection
 
-By default, enabled source roles are grouped deterministically:
+The default grouping is **one ball per sound** (`DEFAULT_ROLE_ACTORS` in `model.ts`): each present role becomes its own actor, named by the sound (Kick, Snare, …) and tinted with that role's distinct colour. The physics family (`kind`) per role is:
 
-| Actor | Source roles | Motion character |
+| kind | Source roles | Motion character |
 |---|---|---|
-| rhythm | kick, snare, percussion | staccato catches and rapid steps |
+| rhythm | kick, snare, percussion | staccato bounces and rapid steps |
 | bass | bass | heavy catches and sustained rails |
 | lead | melodic, piano, guitar, vocal | pitched rails, arcs, phrase crossings |
 
-A group exists only if it has enabled hits or continuous activity, so a scene contains one to three actors by default. Exact co-timed notes in one group share a contact, but that contact stores every source `noteId`.
+An actor exists only if it has enabled hits or sustained activity. Exact co-timed notes within one ball share a contact that stores every source `noteId`.
 
-This grouping is the default, not a hard constraint. `buildScene2D` uses `settings.actorGroups` when the user supplies a custom grouping (see §5.7), so the scene can range from one ball per role (up to eight) to a single ball fed by every role. `ACTOR_GROUPS` in `model.ts` is only the fallback when no custom grouping is set.
+This is only the default. `buildScene2D` uses `settings.actorGroups` when the user supplies a custom grouping (see §5.7), so the scene can range from one ball per sound (up to eight) to a single ball fed by every sound. When a custom group mixes families, its `kind` is `lead` if it contains any pitched role, else `bass` if it contains bass, else `rhythm`. The older semantic rhythm/bass/lead triple (`ACTOR_GROUPS`) is retained as a named preset but is no longer the default.
 
 ### 5.2 Music-fixed targets
 
@@ -148,6 +148,22 @@ p(t) = p0 + v0*t + 0.5*g*t^2
 ```
 
 This guarantees endpoint timing without iterative simulation. A rest/silence ends support and leaves the actor on this freefall path.
+
+**Bounded silence, by actor family.** A single full-gravity ballistic arc across a multi-second silence is degenerate: `0.5*g*dt^2` grows without bound, flying up and plunging thousands of units. The two families handle a rest differently, and both are bounded:
+
+- **Rhythm (bouncing):** `createAnchors` subdivides an unsupported gap longer than `max(beatSec*2, 0.95) s` into short sub-hops on the rest line. The cap is derived from a target apex (`apex = g·dt²/8`), so a drum silence reads as a settling bounce and no hop is tall/near-vertical (this fixed the "percussion teleports up" defect — apex fell from ~7 to ~2). `depth` is zeroed for rhythm and hops are re-clamped upward-only by `enforceRhythmHops`.
+- **Pitched (lead/bass):** a gap is kept as **one** freefall arc — the dramatic fly-up-and-return the design wants — but its per-segment gravity is reduced to `min(GRAVITY, 8·APEX_MAX_PITCHED/dt²)` (`APEX_MAX_PITCHED = 10`) so the arc still hits the next onset exactly on time while its peak stays bounded. Pitched gaps are NOT subdivided: subdividing turned a freefall into a string of bounces on invisible ground, which read as "bouncing on nothing." `depth` still eases to a bounded rest offset.
+
+**Active-range clipping.** Each `Actor` carries `activeStartSec`/`activeEndSec` (first→last contact or support boundary). `createAnchors` seeds the timeline at that range, not `0..durationSec`, and the renderer skips an actor (camera and all draw passes) outside it. So a sound that enters late — e.g. a vocal that starts at 0:21 — simply is not present during the intro instead of bouncing on empty paper for 20 s. `hasSignalActivity` also requires activity ≥ 0.3, so a role that is only separation bleed spawns no ball at all.
+
+### 5.3b Dynamics: sustained swell and pitch height
+
+Motion amplitude used to depend only on timing/gaps, so a held loud/high note (e.g. a sustained vocal "so long") produced no reaction. Two planner terms now translate real dynamics into motion, using data the analyzer already provides:
+
+- **Pitch height → vertical position.** For pitched actors, `musicalOffset -= (pitchMidi - pitchCenter) * 0.1` (raised from 0.055), so a higher note sits visibly higher.
+- **Sustained-activity surge.** After the baseline/rail Y is set, a pitched actor is lifted **undamped** by `SUSTAIN_SWELL_LIFT * (activity - 0.35)` (`SUSTAIN_SWELL_LIFT = 4.5`) whenever the neural role `activity` exceeds `0.35`. A held, high-activity passage surges the ball up sharply and lets it recede as the energy fades. Verified: a synthetic loud/high held note surges ~8 world units (~35 ball radii) versus normal singing.
+
+Because `activityQ8` is per-role normalized, this distinguishes held/high-energy passages from quiet ones, but not "loud" from "even louder"; capturing absolute dynamics would need an added `loudnessQ8` channel in the extractor (future work).
 
 ### 5.4 Sustained rails
 
@@ -167,9 +183,11 @@ Actor-specific X bias and deterministic anchor adjustments preserve a minimum ce
 
 `Scene2DSettings` carries three song-independent, serializable knobs consumed by `buildScene2D`:
 
-- `roleVisible: Record<HitRole, boolean>` — per-role opt-in before grouping.
-- `actorGroups?: ActorGroupConfig[]` — optional custom grouping. Each entry is `{ id, kind, label, color, roles }` and becomes one ball. When present it fully replaces the default `ACTOR_GROUPS`; when absent the default is used. A role should appear in at most one group (the UI enforces this by moving a role out of any other group when it is assigned).
+- `roleVisible: Record<HitRole, boolean>` — per-sound show/hide before grouping.
+- `actorGroups?: ActorGroupConfig[]` — optional custom grouping. Each entry is `{ id, kind, label, color, roles }` and becomes one ball. When present it fully replaces the default; when absent the default is one ball per sound (`DEFAULT_ROLE_ACTORS`). A role appears in at most one ball.
 - `actorOverrides?: Record<actorId, { yOffset, rotationDeg }>` — manual spatial adjustment per ball, keyed by group `id`.
+
+`RideControls` presents each ball as a drag-and-drop box: sounds are draggable chips, dropping a chip into another ball groups them, dropping it on the "New ball" zone splits it out, and empty balls are removed automatically. Each ball has an editable name (defaulting to the sound, never a number), a colour picker, a show/hide toggle, and height/tilt sliders. Regrouping recomputes each ball's `kind` from its contents.
 
 Overrides are applied by `applyActorOverride` after automatic planning and convergence, then rhythm hops are re-clamped. Two deliberate correctness choices:
 
@@ -184,7 +202,7 @@ Custom settings persist across "New Video". If a persisted custom grouping refer
 
 1. near-white paper background;
 2. visible portions of black sustained rails and supports;
-3. black physical impact/catch lines;
+3. black physical impact/catch lines (a `catch` is a concave-up cradle — its rims rise toward the ball along `-normal` and the curve dips to a rounded valley at the contact, so the ball visibly drops INTO it; earlier it was drawn rims-down and read as an upside-down arch);
 4. solid actor circles, drawn last.
 
 There are no fixed lanes, canvas labels, detached rings, waveform/trajectory traces, terrain, particles, or screen shake. Impact squash and the seam are transformed from the sampled actor/contact itself, so they remain attached during collision.
@@ -202,7 +220,7 @@ Every contact still appears at its own time. Temporal reveal changes visibility,
 
 ### Camera
 
-The camera follows the actor pack and fit-zooms to where most balls are, moving through the right-and-down world without audio-energy shake. The camera state resets on seek so random-access playback and snapshot rendering remain deterministic.
+The camera follows the actor pack and fit-zooms to where most balls are, moving through the right-and-down world without audio-energy shake. Only actors that are currently active (within their `activeStartSec..activeEndSec`) are included in the framing, so an idle instrument neither drags the camera toward an empty region nor forces a zoom-out; if nothing is active it holds position using all actors. The camera state resets on seek so random-access playback and snapshot rendering remain deterministic.
 
 Fit zoom uses a **trimmed** vertical extent, not the raw min/max envelope. Positions are time-sampled over the look-ahead window across all actors; the vertical band is the `[trim, 1-trim]` percentile of those samples, with `trim = clamp(0.5 / actorCount, 0.03, 0.12)`. Because each ball contributes a `1/actorCount` share of samples and `trim < 1/actorCount`, a ball that is *persistently* offset (its whole window sits high/low) is kept in frame, while a ball that *briefly* jumps very high or free-falls during a rest occupies only a few samples and is trimmed — it may leave frame instead of forcing everyone to shrink. This directly fixes the "one ball per sound zooms everything out" problem. A per-actor-count spread cap (`BALL_R*12 + actorCount*3.2`) and a raised minimum scale (`8`) are hard backstops so the view can never collapse to an unreadable size regardless of ball count. Verified with 8 balls and a ball jumping out of the pack: scale stayed ~20–35 px/unit (ball radius ≥4.5 px) with smooth per-frame change (~0.08).
 
@@ -290,6 +308,8 @@ The current implementation is expected to preserve these invariants:
 9. Live sampling is deterministic under playback and seeking.
 10. `x == timeSec * SCROLL_X + bias` and monotonic for every actor, including under manual overrides (rotation is a vertical shear, never a world rotation).
 11. The rhythm bounce invariant (no sagging ballistic arc) holds after manual overrides, because hops are re-clamped last.
+12. Every ballistic arc's apex is bounded: rhythm by gap subdivision (`apex ≈ g·dt²/8`, `dt ≤ max(beatSec*2,0.95)`), pitched by reduced per-segment gravity (`apex ≤ APEX_MAX_PITCHED`). No arc escapes to infinity during silence.
+13. An actor is only sampled/drawn within `activeStartSec..activeEndSec`; it never bounces on empty paper before it enters or after it ends.
 
 ## 9. Validation evidence
 
@@ -311,6 +331,8 @@ The visual pass led to bounded rail look-ahead/trail, event-timed contact reveal
 
 Configurable grouping and manual overrides were verified separately with synthetic analyses covering: 0 hits, 1 hit, one role per ball (eight actors), all eight roles merged into one ball, an empty group beside a real one, and custom groups combined with overrides. Under a strong downward tilt the override checks confirmed `x` is byte-identical to the un-tilted scene, remains monotonic, no rhythm ballistic segment sags, and `representedHitCount == sourceHitCount`.
 
+The per-sound default, late-entry clipping, and bounded-arc changes were verified headlessly: default produces eight sound-named distinct-colour balls; a vocal that enters at 20.9 s has `activeStartSec = 20.9` and no contacts before it; rhythm hop apex fell to ~1.5 (from ~7); a long pitched gap stays one arc with reduced gravity (~0.5) bounded to <9 units; representation stays exact; and a full 0–40 s render sweep kept the camera finite with scale ~45–110 and ball radius ≥10 px even while an actor was idle.
+
 ## 10. Decisions and status
 
 | Concern | Current decision | Status |
@@ -323,9 +345,12 @@ Configurable grouping and manual overrides were verified separately with synthet
 | Unsupported motion | exact constant-gravity ballistic solve | Implemented |
 | Sustains | neural-activity cubic rails | Implemented |
 | Rendering | deterministic sparse Canvas 2D | Implemented in web |
-| Camera | centroid + look-ahead + fit zoom | Implemented |
-| Actor grouping | user-configurable, default rhythm/bass/lead | Implemented |
-| Manual layout | per-actor y-offset + shear tilt | Implemented |
+| Camera | active-pack centroid + look-ahead + trimmed fit zoom | Implemented |
+| Actor grouping | user-configurable, default one ball per sound | Implemented |
+| Grouping UI | drag-and-drop ball boxes (name/colour/show-hide) | Implemented |
+| Silence bounding | rhythm subdivision + pitched reduced-gravity arc + active-range clip | Implemented |
+| Catch geometry | concave-up cradle bowl | Implemented |
+| Per-stem audio muting | serve Demucs stems + client Web Audio mix | Proposed (see §13) |
 | Export parity | reuse `scene2d` from Node exporter | Pending integration |
 
 ## 11. Superseded architecture
@@ -356,3 +381,22 @@ The accepted aesthetic is sparse physical causality, not visualizer ornamentatio
 - `packages/web/src/client/src/components/RideControls.tsx` — grouping editor + per-actor sliders.
 - `packages/renderer/src/stream-render.ts` — legacy Node video renderer.
 - `docs/AUDIO_ANALYSIS.md` — detailed analyzer reference.
+
+## 13. Proposed: per-stem audio enable/disable (feasibility)
+
+Goal: when a ball is hidden, actually mute that instrument in playback (not just the visual).
+
+Grounded assessment of the current pipeline:
+
+- `extract_stems.py` already separates the mix into the six `htdemucs_6s` stems (`drums, bass, other, vocals, guitar, piano`) in memory, then discards the audio — only the analysis JSON is written.
+- The server serves the single ORIGINAL mix at `GET /api/audio/:jobId`; `LiveScene` plays it through one `<audio>` element that is both the master clock and the transport (native play/pause/seek).
+
+Hard limitation to design around: `kick`, `snare`, and `percussion` are band-splits of the ONE `drums` stem, so at the audio level they cannot be muted independently — mutable granularity is per stem: **Drums (all percussion together), Bass, Melody (`other`), Vocals, Guitar, Piano.** Ball visibility stays per sound; audio mute maps ball→stem and mutes drums only when all of kick/snare/percussion are hidden. True per-drum muting would need a dedicated drum-separation model (LarsNet/DrumSep) — out of scope.
+
+Concrete plan (phased):
+
+1. Python: `extract_stems.py` optionally writes each accepted stem to a job dir as a compressed mono file (Opus/MP3, mono to bound size) and returns their paths. Verifiable via `py_compile` + a real run.
+2. Wrapper/pipeline/server: surface stem paths through `extractWithAnalysis` → `PipelineResult` → job; add `GET /api/stem/:jobId/:name` (range-capable) and include the stem list in `/api/result`; extend cleanup.
+3. Client: a Web Audio engine decodes the stems into buffers and schedules them on ONE `AudioContext` clock (sample-accurate by construction — not the drift-prone multi-`<audio>` approach), one `GainNode` per stem; ball visibility sets stem gains. This replaces the `<audio>` transport with a context-based one (custom play/pause/seek), and the visualizer clock reads `AudioContext.currentTime`.
+
+Cost/risk: storage/bandwidth (six stem files per job), added export time, and a transport rework. Web Audio single-clock scheduling makes A/V sync robust, but final audio quality/sync can only be confirmed by listening (not headless-verifiable), so this is gated on explicit go-ahead rather than shipped blind.
