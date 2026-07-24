@@ -14,7 +14,7 @@ import type {
   RoleSignalTrack,
   SectionCue,
 } from '../renderTypes.js';
-import { type Scene2DSettings, type ActorGroupConfig, getActorOverride } from './settings.js';
+import { type Scene2DSettings, getActorOverride } from './settings.js';
 import type {
   Actor,
   ActorKind,
@@ -53,6 +53,18 @@ const APEX_MAX_PITCHED = 10;
  * fly-up-and-return). Also bounded by ~10 beats so it scales with tempo.
  */
 const LONG_SILENCE_MIN_SEC = 6;
+/**
+ * A dense run of pitched onsets (a riff) inside a sustained region is
+ * articulated, not legato: each note bounces as a short, clearly-visible pop
+ * instead of being smoothed into a flat rail. This gives fast riffs a real
+ * reaction on ANY song, because it keys off onset density — not per-note pitch,
+ * which the analyzer only estimates coarsely (spectral centroid, not F0).
+ */
+const ARTICULATION_APEX = BALL_R * 1.6;
+/** Cap the pop gravity so the tightest runs stay a snappy bounce, not a spike. */
+const ARTICULATION_MAX_GRAVITY = GRAVITY * 12;
+/** Only a short inter-onset gap counts as part of an articulated run. */
+const ARTICULATION_MAX_SEC = 0.34;
 /** Distance (world units) a dormant ball is pushed off-screen. */
 const OFFSCREEN_DIST = 55;
 /** Seconds the ball spends visibly leaving the frame / dropping back in. */
@@ -933,7 +945,16 @@ function buildSegments(draft: ActorDraft): RaceSegment[] {
     const right = anchors[index + 1]!;
     const duration = right.timeSec - left.timeSec;
     if (duration <= EXACT_TIME_EPSILON) continue;
-    if (draft.actor.kind !== 'rhythm' && isSupported(supportSpans, left.timeSec, right.timeSec)) {
+    const supported =
+      draft.actor.kind !== 'rhythm' && isSupported(supportSpans, left.timeSec, right.timeSec);
+    // Both endpoints "rapid" + a short gap = an articulated riff inside the
+    // sustained region: bounce it (below) instead of drawing a flat rail.
+    const articulatedRun =
+      supported &&
+      left.contact?.rapid === true &&
+      right.contact?.rapid === true &&
+      duration <= ARTICULATION_MAX_SEC;
+    if (supported && !articulatedRun) {
       const midpoint = (left.timeSec + right.timeSec) / 2;
       const direction = signalDirection(signal, midpoint);
       const dx = right.position.x - left.position.x;
@@ -964,10 +985,19 @@ function buildSegments(draft: ActorDraft): RaceSegment[] {
       // ends) while still hitting p1 exactly at t1. Short hops keep full gravity
       // because the cap only bites when g*dt^2/8 would exceed the target apex.
       // Rhythm gaps are already subdivided short, so their gravity stays GRAVITY.
+      // An articulated riff pop uses whatever gravity gives a fixed, clearly
+      // visible apex regardless of note spacing (capped), so a fast run reads as
+      // a rapid string of bounces rather than a flat sustained line.
       const segmentGravity =
         draft.actor.kind === 'rhythm'
           ? GRAVITY
-          : Math.min(GRAVITY, (8 * APEX_MAX_PITCHED) / (duration * duration));
+          : articulatedRun
+            ? clamp(
+                (8 * ARTICULATION_APEX) / (duration * duration),
+                GRAVITY,
+                ARTICULATION_MAX_GRAVITY,
+              )
+            : Math.min(GRAVITY, (8 * APEX_MAX_PITCHED) / (duration * duration));
       const ballistic: BallisticSegment = {
         kind: 'ballistic',
         t0: left.timeSec,

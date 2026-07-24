@@ -131,10 +131,22 @@ there is no separate CLI/pipeline package.
     ball. Score = fraction of the sparser ball's onsets with a partner; only
     well-populated (>=12 onsets), confident (>=0.6) pairs, top 3, denser ball
     is the primary identity.
-- `render.ts` — `renderScene2D(ctx, model, frame)`: draws paper background,
-  black physical rails/catch bowls/contact lines, then solid balls; a
-  trimmed-percentile fit camera that follows the active pack. Deterministic in
-  `frame.timeSec`.
+  - **Articulated riffs** (`buildSegments`): a supported segment between two
+    `rapid` contacts (gap <= `ARTICULATION_MAX_SEC`) is treated as an articulated
+    run, not a legato hold — it becomes a short ballistic "pop" with gravity set
+    for a fixed, clearly-visible apex (`ARTICULATION_APEX`, capped by
+    `ARTICULATION_MAX_GRAVITY`) instead of a flat rail. So a fast riff reads as a
+    string of bounces on ANY song. This keys off onset *density*, deliberately
+    NOT per-note pitch: the analyzer estimates pitch from spectral centroid
+    (brightness), not true F0, so a steady-timbre instrument reports a nearly
+    constant pitch and can't drive melodic contour. Genuinely legato (non-rapid)
+    material keeps the smooth slide rail.
+- `render.ts` — `renderScene2D(ctx, model, frame)`: draws paper background, then
+  physical rails/catch bowls/contact lines, then solid balls; a trimmed-
+  percentile fit camera that follows the active pack. Deterministic in
+  `frame.timeSec`. Lines are tinted per ball via `lineColorFor(actor.color)` —
+  hue preserved, luminance clamped so light balls stay legible on the paper; the
+  ball keeps a dark ink outline over its colour fill.
 - `index.ts` — public exports of the module.
 
 Key invariants (see comments in `model.ts`/`render.ts`): every enabled onset is
@@ -158,6 +170,12 @@ camera (it only frames on-stage balls).
 - `vitest`. `packages/types/src/validators.test.ts` (property + unit tests for
   `validateNoteEvents`) and `test/smoke.test.ts`. The analyzer/scene are
   validated manually against real songs (they need the Python env / a browser).
+- Client type-checking: the React client (`packages/web/src/client`, incl.
+  `scene2d/**`) is checked by its own strict `tsconfig.json` via
+  `npm run typecheck:client -w @motionscore/web`, which runs first inside
+  `web:build`. (Root `tsc -b` only covers `types` + `note-extractor` + the web
+  server; Vite/esbuild strips client types without checking them, so this script
+  is what guards the client. `src/css.d.ts` declares the side-effect CSS import.)
 
 ## Conventions
 
@@ -173,6 +191,9 @@ camera (it only frames on-stage balls).
 - **Change how balls move / look:** `scene2d/model.ts` (motion/planning) and
   `scene2d/render.ts` (drawing/camera).
 - **Change grouping/controls UI:** `components/RideControls.tsx` + `settings.ts`.
+- **Change the look / theme:** `packages/web/src/client/styles/app.css` — a single
+  token-based dark theme (edit the `:root` tokens; the `--paper` token matches
+  the canvas fill). Icons are inline SVGs, no icon font.
 - **Change what the analyzer emits:** `python/extract_stems.py` (+ `extract_events.py`
   helpers), then the validator/types in `audio-events.ts` / `data-contracts.ts`.
 - **Change API/progress:** `packages/web/src/server.ts` and the client

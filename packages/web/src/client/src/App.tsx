@@ -146,31 +146,37 @@ export function App() {
     setErrorMessage(null);
   }, []);
 
+  const busy = state === 'uploading' || state === 'generating';
+
   return (
     <div className="app">
       <header className="app-header">
-        <h1>MotionScore</h1>
-        <p className="subtitle">Music-to-physics live visualizer</p>
+        <div className="brand">
+          <svg className="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+            <path
+              className="brand-line"
+              d="M2 22 Q 9 22 12 12 T 21 12 Q 26 12 30 19"
+              fill="none"
+              strokeWidth="2.4"
+              strokeLinecap="round"
+            />
+            <circle className="brand-ball" cx="12" cy="9" r="3.2" />
+          </svg>
+          <div className="brand-text">
+            <h1>MotionScore</h1>
+            <p className="subtitle">Music-to-physics live visualizer</p>
+          </div>
+        </div>
       </header>
 
       <main className="app-main">
-        <div className="panel-left">
-          <FileUpload
-            file={file}
-            onFileSelect={setFile}
-            disabled={state === 'uploading' || state === 'generating'}
-          />
-          <ConfigForm
-            onGenerate={handleGenerate}
-            disabled={state === 'uploading' || state === 'generating'}
-            canGenerate={file !== null}
-          />
-        </div>
+        <aside className="panel-left">
+          <FileUpload file={file} onFileSelect={setFile} disabled={busy} />
+          <ConfigForm onGenerate={handleGenerate} disabled={busy} canGenerate={file !== null} />
+        </aside>
 
-        <div className="panel-right">
-          {(state === 'uploading' || state === 'generating') && (
-            <ProgressDisplay events={progress} />
-          )}
+        <section className="panel-right">
+          {busy && <ProgressDisplay events={progress} />}
 
           {state === 'complete' && audioUrl && (
             <>
@@ -186,22 +192,51 @@ export function App() {
           )}
 
           {state === 'error' && (
-            <div className="card error-card">
-              <h3>Generation Failed</h3>
-              <p className="error-message">{errorMessage}</p>
-              <button className="btn btn-primary" onClick={handleReset}>
-                Try Again
-              </button>
+            <div className="card state-card state-error">
+              <span className="state-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" />
+                  <line x1="12" y1="9" x2="12" y2="13" />
+                  <line x1="12" y1="17" x2="12.01" y2="17" />
+                </svg>
+              </span>
+              <div className="state-body">
+                <h3>Generation failed</h3>
+                <p className="state-message">{errorMessage}</p>
+                <button className="btn btn-primary" onClick={handleReset} type="button">
+                  Try again
+                </button>
+              </div>
             </div>
           )}
 
           {state === 'idle' && (
-            <div className="card placeholder-card">
-              <div className="placeholder-icon">🎵</div>
-              <p>Upload an audio file to visualize it.</p>
+            <div className="card state-card state-idle">
+              <span className="state-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="3" y1="12" x2="3" y2="12" />
+                  <line x1="6" y1="9" x2="6" y2="15" />
+                  <line x1="9.5" y1="5" x2="9.5" y2="19" />
+                  <line x1="13" y1="8" x2="13" y2="16" />
+                  <line x1="16.5" y1="4" x2="16.5" y2="20" />
+                  <line x1="20" y1="10" x2="20" y2="14" />
+                </svg>
+              </span>
+              <div className="state-body">
+                <h3>No audio loaded</h3>
+                <p className="state-message">
+                  Add an audio file in the panel on the left to analyze it and build a live
+                  physics visualization — one bouncing ball per detected instrument.
+                </p>
+                <ol className="state-steps">
+                  <li>Choose an audio file (.mp3, .wav, .flac, .ogg)</li>
+                  <li>Run the analysis to separate instruments into stems</li>
+                  <li>Watch each sound ride its own line, then fine-tune the scene</li>
+                </ol>
+              </div>
             </div>
           )}
-        </div>
+        </section>
       </main>
     </div>
   );

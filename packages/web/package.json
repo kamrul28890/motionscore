@@ -8,7 +8,8 @@
     "dev": "concurrently \"npx tsx watch src/server.ts\" \"npx vite --config src/client/vite.config.ts\"",
     "build:client": "npx vite build --config src/client/vite.config.ts --outDir ../../dist/client",
     "build:server": "npx tsc -p tsconfig.json",
-    "build": "npm run build:client && npm run build:server",
+    "typecheck:client": "npx tsc --noEmit -p src/client/tsconfig.json",
+    "build": "npm run typecheck:client && npm run build:client && npm run build:server",
     "start": "node dist/server.js"
   },
   "dependencies": {

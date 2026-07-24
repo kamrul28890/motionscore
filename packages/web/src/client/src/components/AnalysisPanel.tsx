@@ -65,24 +65,27 @@ export function AnalysisPanel({ analysis }: AnalysisPanelProps) {
 
   return (
     <div className="card analysis-card">
-      <h2>Music Analysis</h2>
+      <div className="card-head">
+        <h2>Music analysis</h2>
+        <span className="analysis-mode" title="Extraction mode">{MODE_LABELS[analysis.mode]}</span>
+      </div>
 
       <div className="analysis-summary">
         <div className="stat">
-          <span className="stat-value">{MODE_LABELS[analysis.mode]}</span>
-          <span className="stat-label">Mode</span>
-        </div>
-        <div className="stat">
-          <span className="stat-value">{analysis.tempoBpm > 0 ? analysis.tempoBpm.toFixed(0) : '--'}</span>
+          <span className="stat-value">{analysis.tempoBpm > 0 ? analysis.tempoBpm.toFixed(0) : '—'}</span>
           <span className="stat-label">BPM</span>
         </div>
         <div className="stat">
+          <span className="stat-value">{formatTime(durationSec)}</span>
+          <span className="stat-label">Duration</span>
+        </div>
+        <div className="stat">
           <span className="stat-value">{analysis.hitCount}</span>
-          <span className="stat-label">Ball Hits</span>
+          <span className="stat-label">Ball hits</span>
         </div>
         <div className="stat">
           <span className="stat-value">{sectionCues.length}</span>
-          <span className="stat-label">Section Cues</span>
+          <span className="stat-label">Section cues</span>
         </div>
       </div>
 

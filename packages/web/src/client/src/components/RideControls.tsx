@@ -131,33 +131,39 @@ export function RideControls({ settings, onChange, suggestions = [] }: RideContr
 
   return (
     <details className="ride-controls" open>
-      <summary>Scene controls</summary>
+      <summary className="rc-summary">
+        <span className="rc-summary-title">Scene controls</span>
+        <span className="rc-summary-meta">{groups.length} {groups.length === 1 ? 'ball' : 'balls'}</span>
+      </summary>
       <div className="ride-controls-body">
         <p className="rc-hint">
-          One ball per sound, auto-arranged top-to-bottom by register (high sounds
-          ride higher). Drag a sound into another ball to group them, or onto
-          &ldquo;New ball&rdquo; to split it out. Toggle a ball to show/hide it.
+          One ball per sound, auto-arranged top-to-bottom by register (high sounds ride higher).
+          Drag a sound chip into another ball to group them, or onto &ldquo;New ball&rdquo; to
+          split it out. Use the eye toggle to show or hide a ball.
         </p>
 
         {activeSuggestions.length > 0 && (
           <div className="rc-suggestions">
-            <span className="rc-suggest-title">Often play together</span>
-            {activeSuggestions.map((s) => (
-              <div key={`${s.aId}:${s.bId}`} className="rc-suggestion">
-                <span className="rc-suggest-text">
-                  {s.aLabel} + {s.bLabel}
-                  <span className="rc-suggest-score"> {Math.round(s.score * 100)}%</span>
-                </span>
-                <button
-                  type="button"
-                  className="rc-chip rc-merge"
-                  onClick={() => mergeGroups(s.aId, s.bId)}
-                  title={`Merge ${s.bLabel} into ${s.aLabel}`}
-                >
-                  Merge
-                </button>
-              </div>
-            ))}
+            <div className="rc-suggest-head">
+              <span className="rc-suggest-title">Often play together</span>
+              <span className="rc-suggest-note">merge to reduce clutter</span>
+            </div>
+            <div className="rc-suggest-list">
+              {activeSuggestions.map((s) => (
+                <div key={`${s.aId}:${s.bId}`} className="rc-suggestion">
+                  <span className="rc-suggest-text">{s.aLabel} + {s.bLabel}</span>
+                  <span className="rc-suggest-score">{Math.round(s.score * 100)}%</span>
+                  <button
+                    type="button"
+                    className="rc-btn rc-merge"
+                    onClick={() => mergeGroups(s.aId, s.bId)}
+                    title={`Merge ${s.bLabel} into ${s.aLabel}`}
+                  >
+                    Merge
+                  </button>
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
@@ -168,7 +174,7 @@ export function RideControls({ settings, onChange, suggestions = [] }: RideContr
             return (
               <div
                 key={group.id}
-                className={`rc-ball${dropTarget === group.id ? ' rc-ball-drop' : ''}`}
+                className={`rc-ball${dropTarget === group.id ? ' rc-ball-drop' : ''}${actorOn ? '' : ' rc-ball-hidden'}`}
                 onDragOver={(e) => {
                   e.preventDefault();
                   if (dropTarget !== group.id) setDropTarget(group.id);
@@ -197,9 +203,21 @@ export function RideControls({ settings, onChange, suggestions = [] }: RideContr
                     className={`rc-eye${actorOn ? '' : ' rc-eye-off'}`}
                     onClick={() => setRolesVisible(group.roles, !actorOn)}
                     aria-pressed={actorOn}
+                    aria-label={actorOn ? 'Hide ball' : 'Show ball'}
                     title={actorOn ? 'Hide ball' : 'Show ball'}
                   >
-                    {actorOn ? 'shown' : 'hidden'}
+                    {actorOn ? (
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
+                        <circle cx="12" cy="12" r="3" />
+                      </svg>
+                    ) : (
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M9.9 5.1A9.5 9.5 0 0 1 12 5c6.5 0 10 7 10 7a17.6 17.6 0 0 1-2.8 3.5" />
+                        <path d="M6.1 6.1A17.4 17.4 0 0 0 2 12s3.5 7 10 7a9.3 9.3 0 0 0 4.1-.9" />
+                        <path d="M3 3l18 18" />
+                      </svg>
+                    )}
                   </button>
                 </div>
 
@@ -207,12 +225,21 @@ export function RideControls({ settings, onChange, suggestions = [] }: RideContr
                   {group.roles.map((role) => (
                     <span
                       key={role}
-                      className="rc-chip rc-role-chip"
+                      className={`rc-chip rc-role-chip${dragRole === role ? ' dragging' : ''}`}
                       draggable
                       onDragStart={() => setDragRole(role)}
                       onDragEnd={() => { setDragRole(null); setDropTarget(null); }}
                       style={{ borderColor: ROLE_COLORS[role] }}
+                      title="Drag into another ball to group, or onto New ball to split out"
                     >
+                      <svg className="rc-grip" viewBox="0 0 8 12" fill="currentColor" aria-hidden="true">
+                        <circle cx="2" cy="2" r="1" />
+                        <circle cx="6" cy="2" r="1" />
+                        <circle cx="2" cy="6" r="1" />
+                        <circle cx="6" cy="6" r="1" />
+                        <circle cx="2" cy="10" r="1" />
+                        <circle cx="6" cy="10" r="1" />
+                      </svg>
                       <span className="rc-swatch rc-swatch-sm" style={{ background: ROLE_COLORS[role] }} />
                       {ROLE_LABELS[role]}
                     </span>
@@ -258,18 +285,21 @@ export function RideControls({ settings, onChange, suggestions = [] }: RideContr
             onDragLeave={() => setDropTarget((cur) => (cur === 'new' ? null : cur))}
             onDrop={() => handleDrop('new')}
           >
-            + New ball (drop a sound here)
+            <svg className="rc-new-ball-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+            New ball &mdash; drop a sound here
           </div>
         </div>
 
         <div className="rc-reset-row">
-          <button type="button" className="rc-chip rc-reset" onClick={resetToDefault}>
+          <button type="button" className="rc-btn rc-reset" onClick={resetToDefault}>
             Reset to one ball per sound
           </button>
           {hasOverrides && (
             <button
               type="button"
-              className="rc-chip rc-reset"
+              className="rc-btn rc-reset"
               onClick={clearOverrides}
               title="Return every ball to the automatic vertical layout"
             >
