@@ -174,13 +174,14 @@ interface RawExtractionResult {
  */
 export async function analyzeAudioEvents(
   audioPath: string,
+  stemsDir?: string,
 ): Promise<AudioAnalysis> {
   const python = process.env[PYTHON_ENV_VAR] ?? DEFAULT_PYTHON;
   const workDir = await mkdtemp(join(tmpdir(), 'motionscore-analysis-'));
   const outJson = join(workDir, 'analysis.json');
 
   try {
-    await runExtractor(python, audioPath, outJson);
+    await runExtractor(python, audioPath, outJson, stemsDir);
     const rawJson = await readFile(outJson, 'utf8');
     const result = parseExtractionResult(JSON.parse(rawJson) as unknown, audioPath);
     const analysis: AudioAnalysis = {
@@ -214,9 +215,19 @@ export async function extractAudioEvents(audioPath: string): Promise<NoteEvent[]
   return (await analyzeAudioEvents(audioPath)).hits;
 }
 
-function runExtractor(python: string, audioPath: string, outJson: string): Promise<void> {
+function runExtractor(
+  python: string,
+  audioPath: string,
+  outJson: string,
+  stemsDir?: string,
+): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    const child = spawn(python, [STEMS_SCRIPT_PATH, audioPath, outJson, 'stems'], {
+    // argv: <audio> <outJson> <mode> [stemsDir]. The mode token stays for
+    // backward compatibility; stemsDir (optional) makes Python also export the
+    // per-stem audio + a stems.json manifest into that directory.
+    const args = [STEMS_SCRIPT_PATH, audioPath, outJson, 'stems'];
+    if (stemsDir) args.push(stemsDir);
+    const child = spawn(python, args, {
       shell: false,
       env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
     });

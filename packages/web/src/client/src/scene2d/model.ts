@@ -502,6 +502,59 @@ function longSilenceGaps(
   return gaps;
 }
 
+/**
+ * Merge support spans separated by only a brief gap. A short articulation dip in
+ * otherwise-continuous playing would otherwise split one rail into rail /
+ * ballistic hop / rail; if a low (or octave-misdetected) onset lands in that
+ * tiny gap right before the rail resumes, the ball darts down to it and snaps
+ * back up in a fraction of a beat. Bridging keeps continuous playing on one
+ * smooth rail (the per-onset pitch is then eased along it, not slammed).
+ */
+function mergeSupportSpans(spans: readonly SupportSpan[], bridgeSec: number): SupportSpan[] {
+  if (spans.length === 0) return [];
+  const sorted = [...spans].sort((a, b) => a.startSec - b.startSec);
+  const merged: SupportSpan[] = [{ ...sorted[0]! }];
+  for (let i = 1; i < sorted.length; i += 1) {
+    const last = merged[merged.length - 1]!;
+    const span = sorted[i]!;
+    if (span.startSec - last.endSec <= bridgeSec) {
+      last.endSec = Math.max(last.endSec, span.endSec);
+    } else {
+      merged.push({ ...span });
+    }
+  }
+  return merged;
+}
+
+/**
+ * Snap span boundaries onto a nearby contact so a rail begins/ends exactly on a
+ * real onset. Without this a boundary can land a few milliseconds from a
+ * contact, creating a degenerate sub-frame segment whose velocity blows up (the
+ * visible "fall off the line and snap back" glitch).
+ */
+function snapSpansToContacts(
+  spans: readonly SupportSpan[],
+  contacts: readonly RaceContact[],
+  window: number,
+): SupportSpan[] {
+  if (contacts.length === 0) return spans.map((s) => ({ ...s }));
+  const snap = (t: number): number => {
+    let best = t;
+    let bestDistance = window;
+    for (const contact of contacts) {
+      const distance = Math.abs(contact.timeSec - t);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = contact.timeSec;
+      }
+    }
+    return best;
+  };
+  return spans
+    .map((s) => ({ startSec: snap(s.startSec), endSec: snap(s.endSec) }))
+    .filter((s) => s.endSec > s.startSec);
+}
+
 /** Nominal half-height (world units) each actor kind sweeps around its lane. */
 function laneHalfHeight(kind: ActorKind): number {
   if (kind === 'rhythm') return 1.4; // bounded hops
@@ -1333,11 +1386,16 @@ export function buildScene2D(
     // them): a held vocal has onsets, guitar bleeding into the vocal stem does
     // not — this kills the phantom rail during silences.
     const anchoredSpans = rawSpans.filter((s) => spanHasContact(s, contacts, supportMargin));
+    // Bridge brief articulation gaps into one rail, then snap boundaries onto
+    // real onsets — together these prevent the sub-frame "snap" segment that a
+    // low/octave-misdetected onset next to a rail boundary would otherwise make.
+    const bridgedSpans = mergeSupportSpans(anchoredSpans, Math.min(0.3, beatSec * 0.75));
+    const cleanedSpans = snapSpansToContacts(bridgedSpans, contacts, 0.12);
     // Long silences (the ball will leave the screen across these).
-    const longGaps = longSilenceGaps(contacts, anchoredSpans, beatSec);
+    const longGaps = longSilenceGaps(contacts, cleanedSpans, beatSec);
     // A support span overlapping a long silence is an artifact — remove it so
     // the off-screen flight is clean and the re-entry lands on a bare catch.
-    const supportSpans = anchoredSpans.filter(
+    const supportSpans = cleanedSpans.filter(
       (s) => !longGaps.some(([a, b]) => s.startSec < b.timeSec && s.endSec > a.timeSec),
     );
     return {

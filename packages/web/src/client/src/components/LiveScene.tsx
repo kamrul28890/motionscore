@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef } from 'react';
 import type { ResultPayload } from '../renderTypes.js';
 import { RideControls } from './RideControls.js';
+import { StemMixer } from './StemMixer.js';
 import {
   type Ctx2D,
   type Scene2DSettings,
@@ -150,6 +151,10 @@ export function LiveScene({
       </div>
 
       <audio ref={audioRef} src={audioUrl} controls className="live-audio" />
+
+      {result?.stems && result.stems.length > 0 && (
+        <StemMixer masterRef={audioRef} stems={result.stems} />
+      )}
 
       <RideControls
         settings={settings}

@@ -63,6 +63,14 @@ ROLE_DELTA = {
 ROLE_MIN_GAP = 0.09
 PITCHED_ROLES = {"bass", "piano", "guitar", "melodic", "vocal"}
 
+# A pitched-stem onset is only real if the stem is actually sounding there: the
+# stem's own normalized activity at the onset must clear this floor. This rejects
+# separation bleed transients (e.g. a loud guitar leaking into the "silent"
+# vocal stem), which otherwise spawn phantom onsets that yank a dormant ball
+# back on-screen. It is relative to each stem's own dynamic range, so it is
+# song-agnostic and does not touch a stem that is genuinely playing.
+ONSET_ACTIVITY_FLOOR = 0.18
+
 # A stem must carry enough of the separated mix to count as present. This rejects
 # Demucs bleed before each stem is independently normalized.
 STEM_PRESENCE_REL = 0.12
@@ -123,16 +131,17 @@ def _smooth_energy(values, hop_sec, np):
     return output
 
 
-def _normalized_activity(energy, native_times, output_times, np):
-    """Robust role-local activity, sampled on the canonical output timeline."""
-    if output_times.size == 0:
-        return np.asarray([], dtype=float)
+def _native_activity(energy, np):
+    """Robust role-local activity on the stem's own STFT frames (before resample).
+
+    Fast-attack/slow-release smoothing, then a dB range referenced to the stem's
+    own 95th/20th percentiles so the scale is relative to that instrument."""
     values = np.asarray(energy, dtype=float)
     if values.size == 0 or not np.any(np.isfinite(values)):
-        return np.zeros(output_times.size, dtype=float)
+        return np.zeros(values.shape, dtype=float)
     values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
     if float(np.max(values)) <= 1e-10:
-        return np.zeros(output_times.size, dtype=float)
+        return np.zeros(values.shape, dtype=float)
 
     smoothed = _smooth_energy(values, ee.HOP_LENGTH / ANALYSIS_SR, np)
     db = 20.0 * np.log10(np.maximum(smoothed, 1e-10))
@@ -141,9 +150,17 @@ def _normalized_activity(energy, native_times, output_times, np):
     floor_db = max(peak_db - 60.0, min(noise_db, peak_db - 12.0))
     span_db = peak_db - floor_db
     if not np.isfinite(span_db) or span_db <= 1e-6:
-        native = np.clip(smoothed / max(float(np.max(smoothed)), 1e-10), 0.0, 1.0)
-    else:
-        native = np.clip((db - floor_db) / span_db, 0.0, 1.0)
+        return np.clip(smoothed / max(float(np.max(smoothed)), 1e-10), 0.0, 1.0)
+    return np.clip((db - floor_db) / span_db, 0.0, 1.0)
+
+
+def _normalized_activity(energy, native_times, output_times, np):
+    """Robust role-local activity, sampled on the canonical output timeline."""
+    if output_times.size == 0:
+        return np.asarray([], dtype=float)
+    native = _native_activity(energy, np)
+    if native.size == 0:
+        return np.zeros(output_times.size, dtype=float)
     return np.clip(np.interp(output_times, native_times, native), 0.0, 1.0)
 
 
@@ -185,6 +202,39 @@ def _median3(values, np):
     return output
 
 
+def _octave_stabilize(midi, win, np):
+    """Fold pYIN octave errors toward a robust local pitch.
+
+    pYIN occasionally reports a note an octave (or two) off for a frame or two,
+    which makes the ball dart vertically. For each voiced frame, if it sits close
+    to a whole-octave multiple away from the local median, shift it by whole
+    octaves back toward that median. Real steps and leaps *within* an octave are
+    left untouched, and a genuine sustained octave change is followed once the
+    median moves with it — so melodic contour is preserved, only the octave
+    glitches are removed. The median is taken over the ORIGINAL track so a single
+    outlier cannot drag the reference."""
+    n = int(midi.size)
+    if n == 0:
+        return midi
+    out = midi.copy()
+    half = max(1, win // 2)
+    for i in range(n):
+        if not np.isfinite(midi[i]):
+            continue
+        lo = max(0, i - half)
+        hi = min(n, i + half + 1)
+        window = midi[lo:hi]
+        window = window[np.isfinite(window)]
+        if window.size < 3:
+            continue
+        ref = float(np.median(window))
+        diff = float(midi[i]) - ref
+        k = int(round(diff / 12.0))
+        if k != 0 and abs(diff - 12.0 * k) <= 3.0:
+            out[i] = float(np.clip(midi[i] - 12.0 * k, 21.0, 108.0))
+    return out
+
+
 def _pyin_midi(mono, role, np, librosa):
     """Real fundamental-frequency track for one isolated pitched stem.
 
@@ -212,6 +262,10 @@ def _pyin_midi(mono, role, np, librosa):
     midi = np.full(f0.shape, np.nan, dtype=float)
     ok = np.isfinite(f0) & (f0 > 0.0)
     midi[ok] = np.clip(69.0 + 12.0 * np.log2(f0[ok] / 440.0), 21.0, 108.0)
+    # Remove octave glitches (~0.9 s window) so the ball follows the melodic
+    # contour smoothly instead of darting an octave on a tracking error.
+    octave_win = max(5, int(round(0.9 * ANALYSIS_SR / PYIN_HOP)))
+    midi = _octave_stabilize(midi, octave_win, np)
     return {"times": times, "midi": midi, "voiced": np.asarray(voiced, dtype=bool)}
 
 
@@ -381,11 +435,19 @@ def _stem_onset_events(mono, sr, role, np, librosa, f0=None):
     )
     centroid = librosa.feature.spectral_centroid(S=spectrum, sr=sr)[0]
     frames = ee._detect_peak_frames(onset_env, sr, ROLE_DELTA.get(role, 0.08))
+    # Stem-local activity at each frame, so we can reject bleed transients that
+    # fire an onset while the instrument is effectively silent (see the floor).
+    frame_energy = (
+        np.sqrt(np.mean(np.square(spectrum), axis=0)) if spectrum.size else np.asarray([])
+    )
+    activity_native = _native_activity(frame_energy, np)
 
     events = []
     previous_time = -1.0
     for raw_frame in frames:
         frame = int(min(max(raw_frame, 0), onset_env.size - 1))
+        if frame < activity_native.size and activity_native[frame] < ONSET_ACTIVITY_FLOOR:
+            continue
         time_sec = float(librosa.frames_to_time(frame, sr=sr, hop_length=ee.HOP_LENGTH))
         if time_sec - previous_time < ROLE_MIN_GAP:
             continue
@@ -460,6 +522,37 @@ def _drum_role_events(mono, sr, np, librosa):
     return events
 
 
+def _export_stems(stems_dir, stem_mono, active, sr, np):
+    """Write each present stem as a mono MP3, plus a ``stems.json`` manifest, so
+    the web UI can solo/mute individual instruments while watching the scene.
+
+    Levels are preserved (samples are only hard-clipped to [-1, 1] to avoid
+    digital wrap, never per-stem normalized), so the unmuted stems still sum to
+    roughly the original mix — muting one simply removes that instrument. Note:
+    kick/snare/percussion are analysis-only band splits of the single ``drums``
+    stem, so only whole Demucs stems (drums/bass/vocals/guitar/piano/other) are
+    separately playable here."""
+    import os
+    import soundfile as sf
+
+    os.makedirs(stems_dir, exist_ok=True)
+    manifest = []
+    for name in active:
+        mono = np.clip(np.asarray(stem_mono.get(name), dtype=np.float32), -1.0, 1.0)
+        if mono.size == 0:
+            continue
+        filename = f"{name}.mp3"
+        try:
+            sf.write(os.path.join(stems_dir, filename), mono, int(sr), format="MP3")
+        except Exception as err:  # noqa: BLE001 - one bad stem must not fail analysis
+            print(f"[motionscore] stems: failed to write {filename}: {err}", file=sys.stderr)
+            continue
+        manifest.append({"name": name, "file": filename})
+    with open(os.path.join(stems_dir, "stems.json"), "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle)
+    return manifest
+
+
 def _separate(model, wav_t, device, apply_model, torch, shifts):
     # shifts>0 is the Demucs "shift trick" (average predictions over random time
     # offsets) which reduces separation artifacts; per the docs it is only worth
@@ -485,6 +578,9 @@ def main() -> int:
 
     audio_path = sys.argv[1]
     out_path = sys.argv[2]
+    # Optional 4th arg: a directory to write per-stem audio (+ a stems.json
+    # manifest) for the web mixer. argv[3] is the legacy mode token ("stems").
+    stems_dir = sys.argv[4] if len(sys.argv) > 4 else None
     warnings.filterwarnings("ignore")
 
     import numpy as np
@@ -577,6 +673,14 @@ def main() -> int:
                     _stem_onset_events(mono_a, ANALYSIS_SR, role, np, librosa, f0)
                 )
     events.sort(key=lambda event: event["timeSec"])
+
+    # Optional: write per-stem audio for the web mixer (mute/solo instruments).
+    if stems_dir:
+        try:
+            _export_stems(stems_dir, stem_mono, active, model_sr, np)
+        except Exception as err:  # noqa: BLE001 - stem export is best-effort
+            print(f"[motionscore] stems: export failed ({err})", file=sys.stderr)
+
     role_signals = _build_role_signals(analysis_stems, f0_by_role, duration, np, librosa)
 
     # Continuous full-mix features + structural section cues.

@@ -37,7 +37,7 @@ audio upload
             python/extract_stems.py (Demucs) + python/extract_events.py (DSP helpers)
        -> validated AudioAnalysis (packages/types/src/data-contracts.ts)
   -> SSE progress (/api/progress/:id); summary via summarizeAnalysis()
-  -> client fetches /api/result/:id -> { durationSec, audioUrl, analysis }
+  -> client fetches /api/result/:id -> { durationSec, audioUrl, analysis, stems }
   -> scene2d.buildScene2D(analysis, settings) -> Scene2DModel
   -> scene2d.renderScene2D(ctx, model, frame) each rAF, clock = <audio>.currentTime
 ```
@@ -84,11 +84,22 @@ Role order/colours/labels live in the same file (`ROLE_ORDER`, `ROLE_COLORS`,
     so it can be raised for high-fidelity audio use.
   - **Pitch = real F0**, not brightness. Each isolated pitched stem is tracked
     with `librosa.pyin` (`_pyin_midi`, per-role `ROLE_F0_HZ` bounds, run at
-    `PYIN_HOP` ~21.5 Hz to bound cost). That F0 drives both the per-onset
-    `pitchMidi` and the `pitchDirection` (`_pitch_directions_from_midi`), so the
-    scene follows the actual melody. Onsets that are unvoiced/untracked fall back
-    to the old spectral-centroid estimate, so pitch never regresses. pYIN is the
-    slowest step (the analysis is meaningfully slower than separation alone).
+    `PYIN_HOP` ~10.8 Hz to bound cost). `_octave_stabilize` folds pYIN octave
+    glitches toward the local median so the ball follows the melody without
+    darting an octave. That F0 drives both the per-onset `pitchMidi` and the
+    `pitchDirection` (`_pitch_directions_from_midi`); unvoiced/untracked onsets
+    fall back to the spectral-centroid estimate, so pitch never regresses. pYIN
+    is the slowest step (analysis is meaningfully slower than separation alone).
+  - **Onset activity gate** (`ONSET_ACTIVITY_FLOOR`): a pitched-stem onset is
+    kept only where that stem's own normalized activity (`_native_activity`,
+    shared with `_normalized_activity`) clears a floor. This rejects separation
+    bleed (e.g. a loud guitar leaking into the "silent" vocal stem) that would
+    otherwise spawn phantom onsets and yank a dormant ball back on-screen early.
+  - **Stem audio export** (`_export_stems`, only when a 4th `stems_dir` arg is
+    passed): writes each present whole stem as a mono MP3 (levels preserved,
+    only hard-clipped) plus a `stems.json` manifest, for the web mute/solo mixer.
+    kick/snare/perc are analysis-only band splits of the one `drums` stem, so
+    only whole Demucs stems (drums/bass/vocals/guitar/piano/other) are playable.
 - `python/extract_events.py` — **shared DSP helper module** imported by
   extract_stems.py (`import extract_events as ee`): STFT/HPSS feature analysis,
   feature-frame sampling, section-cue detection, peak picking, normalization.
@@ -97,10 +108,14 @@ Role order/colours/labels live in the same file (`ROLE_ORDER`, `ROLE_COLORS`,
 ## Web server (packages/web/src/server.ts)
 
 Audio-only, stems-only. Endpoints: `/api/generate`, `/api/progress/:id` (SSE),
-`/api/result/:id` (`{ durationSec, audioUrl, analysis }`), `/api/audio/:id`.
-Jobs live in memory and are cleaned up after `CLEANUP_TTL_MS` (30 min). Resolves
-the venv Python at boot (auto-detects `.venv`). Calls `note-extractor` directly;
-there is no separate CLI/pipeline package.
+`/api/result/:id` (`{ durationSec, audioUrl, analysis, stems }`), `/api/audio/:id`,
+`/api/stem/:id/:name` (one separated-instrument mp3 for the mixer). Each job gets
+a `stemsDir` (under the OS temp dir) passed to `analyzeAudio(path, { stemsDir })`;
+after analysis the server reads `stems.json` (`readStemManifest`, path-traversal
+guarded) and exposes `stems: [{ id, label, url }]` (labels via `STEM_LABELS`).
+Jobs live in memory and are cleaned up after `CLEANUP_TTL_MS` (30 min) along with
+the input and stems dir. Resolves the venv Python at boot (auto-detects `.venv`).
+Calls `note-extractor` directly; there is no separate CLI/pipeline package.
 
 ## Web client (packages/web/src/client)
 
@@ -110,10 +125,18 @@ there is no separate CLI/pipeline package.
   `LiveScene` (canvas + `<audio>` clock + rAF loop), `RideControls`
   (drag-and-drop ball grouping, per-ball height/tilt/show-hide, one-click
   "Merge" for suggested pairs from `model.mergeSuggestions`, and "Reset
-  positions" to clear manual overrides back to the auto layout).
+  positions" to clear manual overrides back to the auto layout), and `StemMixer`
+  (mute/solo the separated instruments).
+- `src/components/StemMixer.tsx` — the in-browser mixer: renders one hidden
+  `<audio>` per `result.stems` entry, keeps them locked to the mix `<audio>`
+  (the transport + visual clock) by mirroring play/pause/seek/rate and a 250 ms
+  drift correction, and mutes the mix while stems play so you hear their sum.
+  Mute/solo is per-element `.muted` (solo overrides mute). Falls back to the mix
+  if no stems. kick/snare/perc are not separable (one drums stem).
 - `src/renderTypes.ts` — client-side mirror of the wire types (`AudioAnalysis`
-  and its parts; `ResultPayload = { durationSec, audioUrl, analysis }`). Kept in
-  sync with `@motionscore/types` by hand (the client is a standalone Vite bundle).
+  and its parts; `ResultPayload = { durationSec, audioUrl, analysis, stems? }`,
+  `StemTrack`). Kept in sync with `@motionscore/types` by hand (the client is a
+  standalone Vite bundle).
 
 ### The live scene — `src/client/src/scene2d/` (the visual core)
 
@@ -151,6 +174,11 @@ there is no separate CLI/pipeline package.
     melody. Both rely on real per-stem F0 from the analyzer (see below); a fast
     articulated run stays a smooth rail (an earlier "bounce every onset" variant
     over-fired and was reverted).
+  - Support spans are cleaned before use: `mergeSupportSpans` bridges brief
+    articulation gaps (<= ~0.75 beat) into one rail, and `snapSpansToContacts`
+    snaps a rail boundary onto a nearby onset. Together these stop a low/octave-
+    misdetected onset next to a rail boundary from making a degenerate sub-frame
+    segment whose velocity blows up (the "fall off the line and snap back" glitch).
 - `render.ts` — `renderScene2D(ctx, model, frame)`: draws paper background, then
   physical rails/catch bowls/contact lines, then solid balls; a trimmed-
   percentile fit camera that follows the active pack. Deterministic in
