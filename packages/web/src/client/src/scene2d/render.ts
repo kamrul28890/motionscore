@@ -83,6 +83,19 @@ function isActorActive(actor: Actor, timeSec: number): boolean {
   return timeSec >= actor.activeStartSec && timeSec <= actor.activeEndSec;
 }
 
+/**
+ * Framed = active AND not inside a long-silence dormant interval. The camera
+ * only frames framed actors, so a ball that has flown off-screen for a long
+ * rest never drags the view out to chase it.
+ */
+function isActorFramed(actor: Actor, timeSec: number): boolean {
+  if (!isActorActive(actor, timeSec)) return false;
+  for (const dormant of actor.dormantIntervals) {
+    if (timeSec >= dormant.startSec && timeSec <= dormant.endSec) return false;
+  }
+  return true;
+}
+
 function updateCamera(model: Scene2DModel, frame: RenderFrame): void {
   const { camera, timeSec, dt, width, height } = frame;
   const samples = 30;
@@ -92,22 +105,22 @@ function updateCamera(model: Scene2DModel, frame: RenderFrame): void {
 
   let currentXSum = 0;
   let futureXSum = 0;
-  let activeCount = 0;
+  let framedCount = 0;
   let minX = Number.POSITIVE_INFINITY;
   let maxX = Number.NEGATIVE_INFINITY;
   const ys: number[] = [];
 
-  // Only actors that are currently active are framed. An idle actor (before its
-  // first note or after its last) must not drag the camera toward an empty
-  // region of the world.
+  // Only currently-framed actors are considered. An idle actor (before its
+  // first note, after its last, or off-screen during a long silence) must not
+  // drag the camera toward an empty region of the world.
   for (const actor of model.actors) {
-    if (!isActorActive(actor, timeSec)) continue;
-    activeCount += 1;
+    if (!isActorFramed(actor, timeSec)) continue;
+    framedCount += 1;
     currentXSum += sampleActor(actor, timeSec).x;
     futureXSum += sampleActor(actor, futureTime).x;
     for (let index = 0; index <= samples; index += 1) {
       const sampleTime = t0 + ((t1 - t0) * index) / samples;
-      if (!isActorActive(actor, sampleTime)) continue;
+      if (!isActorFramed(actor, sampleTime)) continue;
       const point = sampleActor(actor, sampleTime);
       if (point.x < minX) minX = point.x;
       if (point.x > maxX) maxX = point.x;
@@ -115,18 +128,19 @@ function updateCamera(model: Scene2DModel, frame: RenderFrame): void {
     }
   }
 
-  // If nothing is active right now (a gap between sections), fall back to all
-  // actors so the camera holds a sensible position instead of jumping.
-  if (activeCount === 0) {
+  // Nothing framed right now (e.g. every ball is off-screen mid-silence): hold
+  // the current camera rather than zooming out to include the off-screen balls.
+  if (framedCount === 0) {
+    if (camera.inited) return;
     for (const actor of model.actors) {
       currentXSum += sampleActor(actor, timeSec).x;
       futureXSum += sampleActor(actor, futureTime).x;
       ys.push(sampleActor(actor, timeSec).y);
     }
-    activeCount = Math.max(1, model.actors.length);
+    framedCount = Math.max(1, model.actors.length);
   }
 
-  const actorCount = Math.max(1, activeCount);
+  const actorCount = Math.max(1, framedCount);
   const currentCentroidX = currentXSum / actorCount;
   const futureCentroidX = futureXSum / actorCount;
 

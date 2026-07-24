@@ -109,7 +109,11 @@ there is no separate CLI/pipeline package.
   (default = one ball per sound; `DEFAULT_ROLE_ACTORS`), places music-fixed
   contacts, and solves motion backward — exact constant-gravity ballistic arcs
   (apex-bounded), neural-activity sustained cubic rails, phrase convergence,
-  per-actor active-time clipping, manual override shear/offset. Pure/closed-form
+  per-actor active-time clipping, manual override (bounded vertical shear +
+  offset). Long silences: bleed-only sustain (no onset) is dropped, and a gap
+  longer than ~`max(10 beats, 6s)` becomes a `dormantInterval` where the ball
+  flies off-screen (top if the re-entry note is high, else bottom) and drops
+  back in on the next onset — landing in a `catch` cradle. Pure/closed-form
   sampling: `sampleActor`, `sampleActorVelocity`, `sampleRaceSegment`,
   `sampleRaceVelocity`.
 - `render.ts` — `renderScene2D(ctx, model, frame)`: draws paper background,
@@ -119,9 +123,11 @@ there is no separate CLI/pipeline package.
 - `index.ts` — public exports of the module.
 
 Key invariants (see comments in `model.ts`/`render.ts`): every enabled onset is
-represented; `x == timeSec*SCROLL_X + bias` and monotonic; contacts sit exactly
-on the ball surface at their onset time; ballistic apexes are bounded (no
-"infinite fall"); idle actors are neither drawn nor allowed to drag the camera.
+represented; `x == timeSec*SCROLL_X + bias` and monotonic (manual tilt is a
+bounded shear, never a rotation, so it can't force a zoom-out); contacts sit
+exactly on the ball surface at their onset time; ballistic apexes are bounded
+(no "infinite fall"); idle or long-silence-dormant actors are not framed by the
+camera (it only frames on-stage balls).
 
 ## Setup / ops
 

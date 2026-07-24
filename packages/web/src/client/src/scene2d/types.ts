@@ -115,6 +115,12 @@ export interface Actor {
   /** Time range where this actor has real content; it is idle/hidden outside. */
   activeStartSec: number;
   activeEndSec: number;
+  /**
+   * Long-silence intervals during which the ball flies off-screen and back. The
+   * camera does NOT frame the actor while `timeSec` is inside one of these, so a
+   * ball leaving for a long rest never drags the view.
+   */
+  dormantIntervals: Array<{ startSec: number; endSec: number }>;
 }
 
 export interface Scene2DModel {
