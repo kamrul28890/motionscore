@@ -15,9 +15,6 @@ const CUE_COLORS: Record<SectionCue['type'], string> = {
 };
 
 const MODE_LABELS: Record<AudioAnalysisSummary['mode'], string> = {
-  smart: 'Smart (frequency-band)',
-  beats: 'Beats (metrical pulse)',
-  onsets: 'Onsets (all attacks)',
   stems: 'Stems (neural per-instrument)',
 };
 

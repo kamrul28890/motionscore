@@ -1,19 +1,10 @@
 import { defineConfig } from 'vitest/config';
 
 /**
- * Workspace packages that make up the MotionScore pipeline.
- * Each becomes an isolated Vitest project so tests run with the correct
- * root and are reported per-package.
+ * Workspace packages with tests. Each becomes an isolated Vitest project so
+ * tests run with the correct root and are reported per-package.
  */
-const packages = [
-  'types',
-  'note-extractor',
-  'musical-mapper',
-  'trajectory-solver',
-  'renderer',
-  'video-export',
-  'cli',
-] as const;
+const packages = ['types', 'note-extractor'] as const;
 
 export default defineConfig({
   test: {

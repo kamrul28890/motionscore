@@ -1,16 +1,11 @@
 // @motionscore/types
 //
-// Shared data-contract types (NoteEvent, ChoreographyTarget, TrajectoryKeyframe,
-// ObjectTrajectory), configuration interfaces (CLIOptions, LayoutConfig,
-// SolverConfig, RenderConfig, ExportConfig), and structured error types
-// (InputError, TranscriptionError, ExportError, ValidationError) for the
-// MotionScore pipeline.
-//
-// Also exports the runtime data-contract validators (validateNoteEvents,
-// validateChoreographyTargets, validateObjectTrajectory) run at stage
-// boundaries.
+// Shared data contracts for the neural audio analyzer: HitRole and role
+// metadata (ROLE_ORDER / ROLE_COLORS / ROLE_LABELS), NoteEvent, the rich
+// AudioAnalysis (feature frames, section cues, per-role neural signals) and its
+// compact AudioAnalysisSummary, plus structured errors and the NoteEvent
+// runtime validator.
 
 export * from './data-contracts.js';
-export * from './config.js';
 export * from './errors.js';
 export * from './validators.js';

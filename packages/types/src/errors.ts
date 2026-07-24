@@ -56,18 +56,7 @@ export class TranscriptionError extends Error {
 }
 
 /**
- * Thrown when video export cannot proceed, e.g. ffmpeg is not available on
- * PATH or the encoding step fails.
- */
-export class ExportError extends Error {
-  constructor(message: string, options?: { cause?: unknown }) {
-    super(message, errorOptions(options?.cause));
-    this.name = 'ExportError';
-  }
-}
-
-/**
- * Thrown when a data contract fails validation at a pipeline stage boundary.
+ * Thrown when a data contract fails validation.
  *
  * Carries the `stage` where validation failed, the offending `field`, and the
  * actual `value`, so the pipeline can report exactly what went wrong and where.

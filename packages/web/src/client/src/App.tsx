@@ -2,36 +2,12 @@ import { useState, useCallback } from 'react';
 import { FileUpload } from './components/FileUpload.js';
 import { ConfigForm } from './components/ConfigForm.js';
 import { ProgressDisplay } from './components/ProgressDisplay.js';
-import { VideoPlayer } from './components/VideoPlayer.js';
 import { AnalysisPanel } from './components/AnalysisPanel.js';
 import { LiveScene } from './components/LiveScene.js';
 import { DEFAULT_SCENE_SETTINGS, type Scene2DSettings } from './scene2d/index.js';
 import type { ResultPayload } from './renderTypes.js';
 
 export type AppState = 'idle' | 'uploading' | 'generating' | 'complete' | 'error';
-
-export type ExtractionMode = 'auto' | 'beats' | 'onsets' | 'stems' | 'notes';
-export type BallMode = 'single' | 'per-role';
-
-export interface GenerateOptions {
-  mode: ExtractionMode;
-  balls: BallMode;
-  fps: number;
-  width: number;
-  height: number;
-  layout: 'piano-keys' | 'lanes';
-  codec: string;
-  gpuDevice: number;
-  preset: string;
-  parallelFrames: number;
-}
-
-export interface PipelineStats {
-  totalNotes: number;
-  renderedFrames: number;
-  durationSec: number;
-  maxSyncErrorMs: number;
-}
 
 export type HitRole =
   | 'kick'
@@ -59,7 +35,7 @@ export interface AudioEnergySample {
 }
 
 export interface AudioAnalysisSummary {
-  mode: 'smart' | 'beats' | 'onsets' | 'stems';
+  mode: 'stems';
   tempoBpm: number;
   durationSec: number;
   hitCount: number;
@@ -75,9 +51,7 @@ export interface ProgressEvent {
   message: string;
   percent?: number;
   status?: 'complete' | 'error';
-  stats?: PipelineStats;
   analysis?: AudioAnalysisSummary;
-  videoUrl?: string;
   resultUrl?: string;
   audioUrl?: string;
 }
@@ -85,22 +59,7 @@ export interface ProgressEvent {
 export function App() {
   const [state, setState] = useState<AppState>('idle');
   const [file, setFile] = useState<File | null>(null);
-  const [options, setOptions] = useState<GenerateOptions>({
-    mode: 'auto',
-    balls: 'single',
-    fps: 60,
-    width: 1920,
-    height: 1080,
-    layout: 'piano-keys',
-    codec: 'libx264',
-    gpuDevice: 0,
-    preset: '',
-    parallelFrames: 4,
-  });
   const [progress, setProgress] = useState<ProgressEvent[]>([]);
-  const [videoUrl, setVideoUrl] = useState<string | null>(null);
-  const [jobId, setJobId] = useState<string | null>(null);
-  const [stats, setStats] = useState<PipelineStats | null>(null);
   const [analysis, setAnalysis] = useState<AudioAnalysisSummary | null>(null);
   const [result, setResult] = useState<ResultPayload | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
@@ -112,8 +71,6 @@ export function App() {
 
     setState('uploading');
     setProgress([]);
-    setVideoUrl(null);
-    setStats(null);
     setAnalysis(null);
     setResult(null);
     setAudioUrl(null);
@@ -121,16 +78,6 @@ export function App() {
 
     const formData = new FormData();
     formData.append('file', file);
-    formData.append('mode', options.mode);
-    formData.append('balls', options.balls);
-    formData.append('fps', String(options.fps));
-    formData.append('width', String(options.width));
-    formData.append('height', String(options.height));
-    formData.append('layout', options.layout);
-    formData.append('codec', options.codec);
-    formData.append('gpuDevice', String(options.gpuDevice));
-    if (options.preset) formData.append('preset', options.preset);
-    formData.append('parallelFrames', String(options.parallelFrames));
 
     try {
       const res = await fetch('/api/generate', {
@@ -144,7 +91,6 @@ export function App() {
       }
 
       const { jobId: id } = await res.json();
-      setJobId(id);
       setState('generating');
 
       // Subscribe to SSE progress
@@ -156,12 +102,10 @@ export function App() {
 
         if (data.status === 'complete') {
           setState('complete');
-          setVideoUrl(data.videoUrl ?? null);
-          setStats(data.stats ?? null);
           setAnalysis(data.analysis ?? null);
           setAudioUrl(data.audioUrl ?? null);
-          // Fetch the full choreography + analysis payload for the live scene
-          // (kept off the SSE frame because the trajectory JSON can be large).
+          // Fetch the full analysis payload for the live scene (kept off the SSE
+          // frame because the analysis JSON can be large).
           const resultUrl = data.resultUrl ?? `/api/result/${id}`;
           fetch(resultUrl)
             .then((r) => (r.ok ? r.json() : null))
@@ -190,15 +134,12 @@ export function App() {
       setState('error');
       setErrorMessage(err.message ?? 'Something went wrong');
     }
-  }, [file, options]);
+  }, [file]);
 
   const handleReset = useCallback(() => {
     setState('idle');
     setFile(null);
     setProgress([]);
-    setVideoUrl(null);
-    setJobId(null);
-    setStats(null);
     setAnalysis(null);
     setResult(null);
     setAudioUrl(null);
@@ -209,7 +150,7 @@ export function App() {
     <div className="app">
       <header className="app-header">
         <h1>MotionScore</h1>
-        <p className="subtitle">Music-to-physics video generator</p>
+        <p className="subtitle">Music-to-physics live visualizer</p>
       </header>
 
       <main className="app-main">
@@ -220,8 +161,6 @@ export function App() {
             disabled={state === 'uploading' || state === 'generating'}
           />
           <ConfigForm
-            options={options}
-            onChange={setOptions}
             onGenerate={handleGenerate}
             disabled={state === 'uploading' || state === 'generating'}
             canGenerate={file !== null}
@@ -233,29 +172,15 @@ export function App() {
             <ProgressDisplay events={progress} />
           )}
 
-          {state === 'complete' && (
+          {state === 'complete' && audioUrl && (
             <>
-              {audioUrl ? (
-                <LiveScene
-                  result={result}
-                  audioUrl={audioUrl}
-                  videoUrl={videoUrl}
-                  jobId={jobId!}
-                  stats={stats}
-                  settings={rideSettings}
-                  onSettingsChange={setRideSettings}
-                  onReset={handleReset}
-                />
-              ) : (
-                videoUrl && (
-                  <VideoPlayer
-                    videoUrl={videoUrl}
-                    jobId={jobId!}
-                    stats={stats}
-                    onReset={handleReset}
-                  />
-                )
-              )}
+              <LiveScene
+                result={result}
+                audioUrl={audioUrl}
+                settings={rideSettings}
+                onSettingsChange={setRideSettings}
+                onReset={handleReset}
+              />
               {analysis && <AnalysisPanel analysis={analysis} />}
             </>
           )}
@@ -273,7 +198,7 @@ export function App() {
           {state === 'idle' && (
             <div className="card placeholder-card">
               <div className="placeholder-icon">🎵</div>
-              <p>Upload a MIDI or audio file and configure your settings to generate a video.</p>
+              <p>Upload an audio file to visualize it.</p>
             </div>
           )}
         </div>

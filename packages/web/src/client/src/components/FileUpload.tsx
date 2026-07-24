@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState } from 'react';
 
-const ACCEPTED_EXTENSIONS = ['.mid', '.midi', '.wav', '.mp3', '.flac', '.ogg'];
-const ACCEPT_STRING = ACCEPTED_EXTENSIONS.map((e) => (e === '.mid' ? 'audio/midi' : e === '.midi' ? 'audio/midi' : `audio/${e.slice(1)}`)).join(',') + ',' + ACCEPTED_EXTENSIONS.join(',');
+const ACCEPTED_EXTENSIONS = ['.mp3', '.wav', '.flac', '.ogg'];
+const ACCEPT_STRING = ACCEPTED_EXTENSIONS.map((e) => `audio/${e.slice(1)}`).join(',') + ',' + ACCEPTED_EXTENSIONS.join(',');
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -11,7 +11,6 @@ function formatFileSize(bytes: number): string {
 
 function detectType(filename: string): string {
   const ext = filename.toLowerCase().match(/\.[^.]+$/)?.[0] ?? '';
-  if (['.mid', '.midi'].includes(ext)) return 'MIDI';
   if (['.wav', '.mp3', '.flac', '.ogg'].includes(ext)) return 'Audio';
   return 'Unknown';
 }
@@ -85,7 +84,7 @@ export function FileUpload({ file, onFileSelect, disabled }: FileUploadProps) {
       >
         {file ? (
           <div className="file-info">
-            <div className="file-icon">{detectType(file.name) === 'MIDI' ? '🎹' : '🎵'}</div>
+            <div className="file-icon">🎵</div>
             <div className="file-details">
               <span className="file-name">{file.name}</span>
               <span className="file-meta">
@@ -96,8 +95,8 @@ export function FileUpload({ file, onFileSelect, disabled }: FileUploadProps) {
         ) : (
           <div className="drop-prompt">
             <div className="drop-icon">📁</div>
-            <p>Drag and drop a file here, or click to browse</p>
-            <span className="drop-hint">.mid, .midi, .wav, .mp3, .flac, .ogg</span>
+            <p>Drag and drop an audio file here, or click to browse</p>
+            <span className="drop-hint">.mp3, .wav, .flac, .ogg</span>
           </div>
         )}
       </div>
