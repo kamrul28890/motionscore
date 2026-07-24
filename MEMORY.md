@@ -74,6 +74,21 @@ Role order/colours/labels live in the same file (`ROLE_ORDER`, `ROLE_COLORS`,
 - `python/extract_stems.py` — the analyzer: Demucs separation (CUDA w/ CPU
   fallback), per-stem onset detection, drums band-split into kick/snare/perc,
   and the `roleSignals` waveform activity/sustain/pitch signals. Emits one JSON.
+  - Demucs config (audited against the official docs): `htdemucs_6s` (the only
+    model with separate guitar/piano sources), `overlap=0.25`, `segment` left at
+    the model default (Hybrid Transformer models cap at 7.8s, so forcing a larger
+    value errors), and the shift trick left OFF (`shifts=0`): a single shift is a
+    random-offset pass with no averaging gain and would only make separation
+    non-deterministic; a real gain needs `shifts>=2` at proportional cost, not
+    worth it for coarse onset/pitch analysis. `_separate` still takes the param
+    so it can be raised for high-fidelity audio use.
+  - **Pitch = real F0**, not brightness. Each isolated pitched stem is tracked
+    with `librosa.pyin` (`_pyin_midi`, per-role `ROLE_F0_HZ` bounds, run at
+    `PYIN_HOP` ~21.5 Hz to bound cost). That F0 drives both the per-onset
+    `pitchMidi` and the `pitchDirection` (`_pitch_directions_from_midi`), so the
+    scene follows the actual melody. Onsets that are unvoiced/untracked fall back
+    to the old spectral-centroid estimate, so pitch never regresses. pYIN is the
+    slowest step (the analysis is meaningfully slower than separation alone).
 - `python/extract_events.py` — **shared DSP helper module** imported by
   extract_stems.py (`import extract_events as ee`): STFT/HPSS feature analysis,
   feature-frame sampling, section-cue detection, peak picking, normalization.
@@ -131,16 +146,11 @@ there is no separate CLI/pipeline package.
     ball. Score = fraction of the sparser ball's onsets with a partner; only
     well-populated (>=12 onsets), confident (>=0.6) pairs, top 3, denser ball
     is the primary identity.
-  - **Articulated riffs** (`buildSegments`): a supported segment between two
-    `rapid` contacts (gap <= `ARTICULATION_MAX_SEC`) is treated as an articulated
-    run, not a legato hold — it becomes a short ballistic "pop" with gravity set
-    for a fixed, clearly-visible apex (`ARTICULATION_APEX`, capped by
-    `ARTICULATION_MAX_GRAVITY`) instead of a flat rail. So a fast riff reads as a
-    string of bounces on ANY song. This keys off onset *density*, deliberately
-    NOT per-note pitch: the analyzer estimates pitch from spectral centroid
-    (brightness), not true F0, so a steady-timbre instrument reports a nearly
-    constant pitch and can't drive melodic contour. Genuinely legato (non-rapid)
-    material keeps the smooth slide rail.
+  - Pitched onsets map register to height (`(pitchMidi - median) * 0.1`) and
+    sustained pitched material follows `pitchDirection`, so the rail traces the
+    melody. Both rely on real per-stem F0 from the analyzer (see below); a fast
+    articulated run stays a smooth rail (an earlier "bounce every onset" variant
+    over-fired and was reverted).
 - `render.ts` — `renderScene2D(ctx, model, frame)`: draws paper background, then
   physical rails/catch bowls/contact lines, then solid balls; a trimmed-
   percentile fit camera that follows the active pack. Deterministic in

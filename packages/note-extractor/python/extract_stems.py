@@ -76,6 +76,24 @@ SUSTAIN_OFF = 0.18
 PITCH_ENTER_SEMITONES_PER_SEC = 1.0
 PITCH_EXIT_SEMITONES_PER_SEC = 0.4
 
+# Plausible fundamental-frequency range (Hz) per role, used to constrain the
+# pYIN pitch tracker on each ISOLATED stem. Because Demucs has already separated
+# the instrument, monophonic-ish F0 tracking on the stem is reliable and gives
+# real melodic contour (a high note sits high) instead of spectral-centroid
+# "brightness", which barely moves for a steady-timbre instrument.
+ROLE_F0_HZ = {
+    "bass": (41.0, 400.0),      # E1..~G4
+    "vocal": (80.0, 1100.0),    # ~E2..~C6
+    "guitar": (80.0, 1320.0),   # ~E2..~E6
+    "piano": (55.0, 2100.0),    # ~A1..~C7
+    "melodic": (65.0, 2100.0),  # generic pitched "other"
+}
+# pYIN is by far the slowest analysis step, so run it at ~10.8 Hz (a quarter of
+# the STFT frame rate). That matches the 10 Hz role-signal output grid (so the
+# register-direction signal loses nothing) and is still fine for per-onset pitch
+# on spaced notes; pitch is interpolated back onto onset times and the 10 Hz grid.
+PYIN_HOP = ee.HOP_LENGTH * 4
+
 
 def _signal_times(duration, np):
     """Canonical fixed-rate timeline shared with full-mix feature frames."""
@@ -167,24 +185,82 @@ def _median3(values, np):
     return output
 
 
-def _pitch_directions(spectrum, sr, native_times, output_times, activity, spans, np, librosa):
-    """Estimate coarse register motion, not note transcription or melody F0."""
-    if output_times.size == 0 or spectrum.size == 0:
+def _pyin_midi(mono, role, np, librosa):
+    """Real fundamental-frequency track for one isolated pitched stem.
+
+    Returns ``{"times", "midi", "voiced"}`` on pYIN's own frame grid (MIDI, with
+    NaN where unvoiced), or ``None`` if the stem is too short or tracking fails.
+    Constraining ``fmin``/``fmax`` per role both speeds up pYIN and rejects
+    octave errors and residual bleed outside the instrument's range."""
+    fmin, fmax = ROLE_F0_HZ.get(role, (65.0, 2100.0))
+    if mono.size < ee.N_FFT:
+        return None
+    try:
+        f0, voiced, _ = librosa.pyin(
+            mono,
+            fmin=fmin,
+            fmax=fmax,
+            sr=ANALYSIS_SR,
+            frame_length=ee.N_FFT,
+            hop_length=PYIN_HOP,
+            center=True,
+            fill_na=float("nan"),
+        )
+    except Exception:
+        return None
+    times = librosa.times_like(f0, sr=ANALYSIS_SR, hop_length=PYIN_HOP)
+    midi = np.full(f0.shape, np.nan, dtype=float)
+    ok = np.isfinite(f0) & (f0 > 0.0)
+    midi[ok] = np.clip(69.0 + 12.0 * np.log2(f0[ok] / 440.0), 21.0, 108.0)
+    return {"times": times, "midi": midi, "voiced": np.asarray(voiced, dtype=bool)}
+
+
+def _sample_f0_midi(f0, time_sec, np):
+    """MIDI pitch at (or just after) an onset time, or NaN if none nearby.
+
+    An attack frame is often unvoiced, so search a few frames FORWARD into the
+    note's sustain first, then a little backward, before giving up."""
+    if f0 is None:
+        return float("nan")
+    times = f0["times"]
+    midi = f0["midi"]
+    if times.size == 0:
+        return float("nan")
+    base = int(np.clip(np.searchsorted(times, time_sec), 0, midi.size - 1))
+    # Forward-biased, tight search (frames are ~93 ms): prefer this note's
+    # sustain just after the attack, without reaching into a neighbouring note.
+    for offset in (0, 1, -1, 2):
+        index = base + offset
+        if 0 <= index < midi.size and np.isfinite(midi[index]):
+            return float(midi[index])
+    return float("nan")
+
+
+def _pitch_directions_from_midi(f0, output_times, activity, spans, np):
+    """Coarse register motion (rising/steady/falling) from the real F0 track.
+
+    Same Schmitt-trigger over pitch slope as before, but driven by pYIN MIDI
+    instead of spectral centroid, so it tracks the actual melody. Direction is
+    only emitted where the note is voiced AND the role is active."""
+    if f0 is None or output_times.size == 0:
         return [0] * int(output_times.size), 0
 
-    magnitudes = np.asarray(spectrum, dtype=float)
-    freqs = librosa.fft_frequencies(sr=sr, n_fft=ee.N_FFT)
-    weight = np.sum(magnitudes, axis=0)
-    centroid = np.sum(magnitudes * freqs[:, None], axis=0) / np.maximum(weight, 1e-10)
-    valid_native = (weight > 1e-9) & np.isfinite(centroid) & (centroid > 0.0)
-    midi = 69.0 + 12.0 * np.log2(np.maximum(centroid, 1e-6) / 440.0)
-    midi = np.clip(midi, 21.0, 108.0)
-    sampled = _median3(np.interp(output_times, native_times, midi), np)
-    valid_sampled = np.interp(
-        output_times, native_times, valid_native.astype(float)
-    ) >= 0.5
+    times_native = f0["times"]
+    midi_native = f0["midi"]
+    voiced_native = f0["voiced"]
+    finite = np.isfinite(midi_native)
+    if not np.any(finite):
+        return [0] * int(output_times.size), 0
+
+    # Hold pitch across short unvoiced gaps so the slope stays continuous, but
+    # keep a separate voiced mask so silent/unpitched frames emit no direction.
+    midi_held = np.interp(times_native, times_native[finite], midi_native[finite])
+    sampled = _median3(np.interp(output_times, times_native, midi_held), np)
+    voiced_out = (
+        np.interp(output_times, times_native, voiced_native.astype(float)) >= 0.5
+    )
     active_frames = np.asarray(activity) >= SUSTAIN_ON
-    usable = valid_sampled & active_frames
+    usable = voiced_out & active_frames
     active_count = int(np.count_nonzero(active_frames))
     coverage = (
         int(np.floor(255.0 * np.count_nonzero(usable) / active_count + 0.5))
@@ -222,7 +298,7 @@ def _pitch_directions(spectrum, sr, native_times, output_times, activity, spans,
     return directions.astype(int).tolist(), max(0, min(255, coverage))
 
 
-def _role_track(role, spectrum, duration, np, librosa):
+def _role_track(role, spectrum, duration, np, librosa, f0=None):
     output_times = _signal_times(duration, np)
     native_times = librosa.frames_to_time(
         np.arange(spectrum.shape[1]), sr=ANALYSIS_SR, hop_length=ee.HOP_LENGTH
@@ -236,15 +312,8 @@ def _role_track(role, spectrum, duration, np, librosa):
         "sustainSpans": spans,
     }
     if role in PITCHED_ROLES:
-        directions, coverage = _pitch_directions(
-            spectrum,
-            ANALYSIS_SR,
-            native_times,
-            output_times,
-            activity,
-            spans,
-            np,
-            librosa,
+        directions, coverage = _pitch_directions_from_midi(
+            f0, output_times, activity, spans, np
         )
         track["pitchDirection"] = directions
         track["pitchCoverageQ8"] = coverage
@@ -263,7 +332,7 @@ def _empty_role_track(role, frame_count):
     return track
 
 
-def _build_role_signals(analysis_stems, duration, np, librosa):
+def _build_role_signals(analysis_stems, f0_by_role, duration, np, librosa):
     """Build all eight aligned role tracks from already accepted Demucs stems."""
     output_times = _signal_times(duration, np)
     tracks_by_role = {}
@@ -286,7 +355,7 @@ def _build_role_signals(analysis_stems, duration, np, librosa):
             role = STEM_ROLE.get(name)
             if role is not None:
                 tracks_by_role[role] = _role_track(
-                    role, spectrum, duration, np, librosa
+                    role, spectrum, duration, np, librosa, f0_by_role.get(role)
                 )
 
     frame_count = int(output_times.size)
@@ -302,7 +371,7 @@ def _build_role_signals(analysis_stems, duration, np, librosa):
     }
 
 
-def _stem_onset_events(mono, sr, role, np, librosa):
+def _stem_onset_events(mono, sr, role, np, librosa, f0=None):
     """Detect onsets in one isolated mono stem; return raw event dicts."""
     spectrum = np.abs(librosa.stft(mono, n_fft=ee.N_FFT, hop_length=ee.HOP_LENGTH))
     reference = max(float(np.max(spectrum)), 1e-10)
@@ -324,11 +393,18 @@ def _stem_onset_events(mono, sr, role, np, librosa):
         strength = float(onset_env[frame])
         salience = ee._clip01(0.3 + 0.7 * strength)
         pitch = ee.ROLE_PITCH.get(role, 64.0)
-        if role in PITCHED_ROLES and frame < centroid.size:
-            hz = float(centroid[frame])
-            if hz > 0.0 and np.isfinite(hz):
-                spectral = 69.0 + 12.0 * np.log2(hz / 440.0)
-                pitch = 0.5 * pitch + 0.5 * max(40.0, min(84.0, spectral))
+        if role in PITCHED_ROLES:
+            # Prefer the real fundamental at this onset; only fall back to the
+            # coarse spectral-centroid estimate when the note is unvoiced or F0
+            # tracking is unavailable, so pitch never regresses below before.
+            f0_midi = _sample_f0_midi(f0, time_sec, np)
+            if np.isfinite(f0_midi):
+                pitch = f0_midi
+            elif frame < centroid.size:
+                hz = float(centroid[frame])
+                if hz > 0.0 and np.isfinite(hz):
+                    spectral = 69.0 + 12.0 * np.log2(hz / 440.0)
+                    pitch = 0.5 * pitch + 0.5 * max(40.0, min(84.0, spectral))
         events.append(
             {
                 "timeSec": round(time_sec, 6),
@@ -384,10 +460,21 @@ def _drum_role_events(mono, sr, np, librosa):
     return events
 
 
-def _separate(model, wav_t, device, apply_model, torch):
+def _separate(model, wav_t, device, apply_model, torch, shifts):
+    # shifts>0 is the Demucs "shift trick" (average predictions over random time
+    # offsets) which reduces separation artifacts; per the docs it is only worth
+    # it on GPU, so callers pass 0 on CPU. overlap=0.25 is the recommended
+    # default; `segment` is intentionally left at the model default (Hybrid
+    # Transformer models are capped at 7.8s, so forcing a larger value errors).
     with torch.no_grad():
         return apply_model(
-            model, wav_t[None], device=device, split=True, overlap=0.25, progress=False
+            model,
+            wav_t[None],
+            device=device,
+            shifts=shifts,
+            split=True,
+            overlap=0.25,
+            progress=False,
         )[0]
 
 
@@ -424,14 +511,22 @@ def main() -> int:
     std = reference.std() + 1e-8
     wav_t = (wav_t - mean) / std
 
+    # Shift trick (shifts): each shift is a random-offset pass, so a real quality
+    # gain needs shifts>=2 (averaging), at a proportional time cost, and it makes
+    # separation non-deterministic. We consume the stems only for coarse
+    # onset/pitch analysis, where that marginal SDR gain is irrelevant but
+    # determinism (same song -> same visualization) and speed matter — so it
+    # stays off. Bump this (GPU only, per the docs) if you need cleaner *audio*.
+    shifts = 0
     print(
-        f"[motionscore] stems: separating on {device.upper()} (model {MODEL_NAME})",
+        f"[motionscore] stems: separating on {device.upper()} "
+        f"(model {MODEL_NAME}, shifts={shifts})",
         file=sys.stderr,
         flush=True,
     )
 
     try:
-        est = _separate(model, wav_t, device, apply_model, torch)
+        est = _separate(model, wav_t, device, apply_model, torch, shifts)
     except RuntimeError as err:
         if device == "cuda":
             print(
@@ -444,7 +539,7 @@ def main() -> int:
             except Exception:
                 pass
             device = "cpu"
-            est = _separate(model, wav_t, device, apply_model, torch)
+            est = _separate(model, wav_t, device, apply_model, torch, 0)
         else:
             raise
     est = (est * std + mean).cpu().numpy()
@@ -461,6 +556,7 @@ def main() -> int:
     events = []
     active = []
     analysis_stems = {}
+    f0_by_role = {}
     for name, mono in stem_mono.items():
         if stem_rms[name] < presence_floor:
             continue
@@ -472,9 +568,16 @@ def main() -> int:
         else:
             role = STEM_ROLE.get(name)
             if role is not None:
-                events.extend(_stem_onset_events(mono_a, ANALYSIS_SR, role, np, librosa))
+                # One F0 track per pitched stem, reused for both the per-onset
+                # pitch and the continuous register-direction signal.
+                f0 = _pyin_midi(mono_a, role, np, librosa) if role in PITCHED_ROLES else None
+                if f0 is not None:
+                    f0_by_role[role] = f0
+                events.extend(
+                    _stem_onset_events(mono_a, ANALYSIS_SR, role, np, librosa, f0)
+                )
     events.sort(key=lambda event: event["timeSec"])
-    role_signals = _build_role_signals(analysis_stems, duration, np, librosa)
+    role_signals = _build_role_signals(analysis_stems, f0_by_role, duration, np, librosa)
 
     # Continuous full-mix features + structural section cues.
     y_full = librosa.to_mono(wav)
