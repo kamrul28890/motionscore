@@ -115,6 +115,26 @@ export interface Actor {
   /** Time range where this actor has real content; it is idle/hidden outside. */
   activeStartSec: number;
   activeEndSec: number;
+  /**
+   * Long-silence intervals during which the ball flies off-screen and back. The
+   * camera does NOT frame the actor while `timeSec` is inside one of these, so a
+   * ball leaving for a long rest never drags the view.
+   */
+  dormantIntervals: Array<{ startSec: number; endSec: number }>;
+}
+
+/**
+ * A hint that two balls play together most of the time, so merging them into
+ * one ball would reduce visual clutter without losing any onset. `aId`/`bId`
+ * are actor (group) ids; `score` is the fraction of the sparser ball's onsets
+ * that coincide with the other's.
+ */
+export interface MergeSuggestion {
+  aId: string;
+  bId: string;
+  aLabel: string;
+  bLabel: string;
+  score: number;
 }
 
 export interface Scene2DModel {
@@ -126,6 +146,8 @@ export interface Scene2DModel {
   /** Regression invariant: all source hits are represented by contact noteIds. */
   sourceHitCount: number;
   representedHitCount: number;
+  /** Pairs of balls that hit together often enough to suggest merging them. */
+  mergeSuggestions: MergeSuggestion[];
 }
 
 export interface CameraState {

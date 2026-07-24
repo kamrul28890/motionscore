@@ -44,11 +44,15 @@ export function ProgressDisplay({ events }: ProgressDisplayProps) {
 
   return (
     <div className="card progress-card">
-      <h2>Progress</h2>
-
-      <div className="progress-header">
-        <span className="progress-stage">{currentStage}</span>
+      <div className="card-head">
+        <h2>Analyzing</h2>
         <span className="progress-time">{formatTime(elapsed)}</span>
+      </div>
+
+      <div className="progress-status">
+        <span className="progress-dot" aria-hidden="true" />
+        <span className="progress-stage">{currentStage}</span>
+        <span className="progress-percent-inline">{percent}%</span>
       </div>
 
       <div className="progress-bar-container">
@@ -61,7 +65,6 @@ export function ProgressDisplay({ events }: ProgressDisplayProps) {
           aria-valuemax={100}
         />
       </div>
-      <div className="progress-percent">{percent}%</div>
 
       <div className="progress-log" ref={logRef}>
         {events.map((event, i) => (

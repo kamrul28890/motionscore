@@ -10,6 +10,7 @@ export type {
   RaceContact,
   ContactStyle,
   Scene2DModel,
+  MergeSuggestion,
   CameraState,
   RenderFrame,
 } from './types.js';

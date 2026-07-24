@@ -24,6 +24,34 @@ import type {
 
 const PAPER = '#f7f3e8';
 const INK = '#151515';
+
+/**
+ * A readable stroke colour derived from a ball's fill: keep the hue but clamp
+ * brightness so even light balls (yellow, pale green) stay legible as lines on
+ * the cream paper. Vivid mid/dark colours pass through unchanged. Cached so
+ * each hex is parsed once.
+ */
+const lineColorCache = new Map<string, string>();
+function lineColorFor(fill: string): string {
+  const cached = lineColorCache.get(fill);
+  if (cached !== undefined) return cached;
+  const match = /^#?([0-9a-fA-F]{6})$/.exec(fill.trim());
+  if (!match) {
+    lineColorCache.set(fill, INK);
+    return INK;
+  }
+  const value = parseInt(match[1]!, 16);
+  const r = (value >> 16) & 255;
+  const g = (value >> 8) & 255;
+  const b = value & 255;
+  const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+  const maxLuminance = 150;
+  const k = luminance > maxLuminance ? maxLuminance / luminance : 1;
+  const out = `rgb(${Math.round(r * k)}, ${Math.round(g * k)}, ${Math.round(b * k)})`;
+  lineColorCache.set(fill, out);
+  return out;
+}
+
 const LOOK_BEHIND_SEC = 0.35;
 const LOOK_AHEAD_SEC = 2.8;
 const CAMERA_MARGIN = 0.11;
@@ -83,6 +111,19 @@ function isActorActive(actor: Actor, timeSec: number): boolean {
   return timeSec >= actor.activeStartSec && timeSec <= actor.activeEndSec;
 }
 
+/**
+ * Framed = active AND not inside a long-silence dormant interval. The camera
+ * only frames framed actors, so a ball that has flown off-screen for a long
+ * rest never drags the view out to chase it.
+ */
+function isActorFramed(actor: Actor, timeSec: number): boolean {
+  if (!isActorActive(actor, timeSec)) return false;
+  for (const dormant of actor.dormantIntervals) {
+    if (timeSec >= dormant.startSec && timeSec <= dormant.endSec) return false;
+  }
+  return true;
+}
+
 function updateCamera(model: Scene2DModel, frame: RenderFrame): void {
   const { camera, timeSec, dt, width, height } = frame;
   const samples = 30;
@@ -92,22 +133,22 @@ function updateCamera(model: Scene2DModel, frame: RenderFrame): void {
 
   let currentXSum = 0;
   let futureXSum = 0;
-  let activeCount = 0;
+  let framedCount = 0;
   let minX = Number.POSITIVE_INFINITY;
   let maxX = Number.NEGATIVE_INFINITY;
   const ys: number[] = [];
 
-  // Only actors that are currently active are framed. An idle actor (before its
-  // first note or after its last) must not drag the camera toward an empty
-  // region of the world.
+  // Only currently-framed actors are considered. An idle actor (before its
+  // first note, after its last, or off-screen during a long silence) must not
+  // drag the camera toward an empty region of the world.
   for (const actor of model.actors) {
-    if (!isActorActive(actor, timeSec)) continue;
-    activeCount += 1;
+    if (!isActorFramed(actor, timeSec)) continue;
+    framedCount += 1;
     currentXSum += sampleActor(actor, timeSec).x;
     futureXSum += sampleActor(actor, futureTime).x;
     for (let index = 0; index <= samples; index += 1) {
       const sampleTime = t0 + ((t1 - t0) * index) / samples;
-      if (!isActorActive(actor, sampleTime)) continue;
+      if (!isActorFramed(actor, sampleTime)) continue;
       const point = sampleActor(actor, sampleTime);
       if (point.x < minX) minX = point.x;
       if (point.x > maxX) maxX = point.x;
@@ -115,18 +156,19 @@ function updateCamera(model: Scene2DModel, frame: RenderFrame): void {
     }
   }
 
-  // If nothing is active right now (a gap between sections), fall back to all
-  // actors so the camera holds a sensible position instead of jumping.
-  if (activeCount === 0) {
+  // Nothing framed right now (e.g. every ball is off-screen mid-silence): hold
+  // the current camera rather than zooming out to include the off-screen balls.
+  if (framedCount === 0) {
+    if (camera.inited) return;
     for (const actor of model.actors) {
       currentXSum += sampleActor(actor, timeSec).x;
       futureXSum += sampleActor(actor, futureTime).x;
       ys.push(sampleActor(actor, timeSec).y);
     }
-    activeCount = Math.max(1, model.actors.length);
+    framedCount = Math.max(1, model.actors.length);
   }
 
-  const actorCount = Math.max(1, activeCount);
+  const actorCount = Math.max(1, framedCount);
   const currentCentroidX = currentXSum / actorCount;
   const futureCentroidX = futureXSum / actorCount;
 
@@ -204,13 +246,14 @@ function drawSlideSupports(
   segment: SlideSegment,
   range: [number, number],
   scale: number,
+  ink: string,
 ): void {
   const dx = Math.abs(segment.p1.x - segment.p0.x) * (range[1] - range[0]);
   // Sparser, fainter struts read as ground hatching under the rail rather than
   // detached ticks floating in space.
   const supportCount = Math.floor((dx * scale) / 96);
   if (supportCount < 1) return;
-  ctx.strokeStyle = INK;
+  ctx.strokeStyle = ink;
   ctx.lineWidth = 0.9 / scale;
   ctx.globalAlpha = 0.26;
   for (let index = 0; index < supportCount; index += 1) {
@@ -233,12 +276,13 @@ function drawSlide(
   segment: SlideSegment,
   range: [number, number],
   scale: number,
+  ink: string,
 ): void {
-  drawSlideSupports(ctx, segment, range, scale);
+  drawSlideSupports(ctx, segment, range, scale, ink);
   const pixelLength =
     Math.abs(segment.p1.x - segment.p0.x) * (range[1] - range[0]) * scale;
   const steps = Math.max(4, Math.ceil(pixelLength / 7));
-  ctx.strokeStyle = INK;
+  ctx.strokeStyle = ink;
   ctx.lineWidth = (3.1 + segment.activity * 1.3) / scale;
   ctx.globalAlpha = 1;
   ctx.beginPath();
@@ -270,11 +314,12 @@ function drawContactSupports(
   contact: RaceContact,
   scale: number,
   alpha: number,
+  ink: string,
 ): void {
   if (contact.supportLength <= 0) return;
   const [left, right] = contactEndpoints(contact);
   const points = contact.style === 'step' ? [contact.surfacePoint] : [left, right];
-  ctx.strokeStyle = INK;
+  ctx.strokeStyle = ink;
   ctx.lineWidth = 1.15 / scale;
   ctx.globalAlpha = alpha * (contact.intentionalConvergence ? 0.82 : 0.68);
   for (const point of points) {
@@ -308,10 +353,11 @@ function drawContact(
   contact: RaceContact,
   scale: number,
   alpha: number,
+  ink: string,
 ): void {
-  drawContactSupports(ctx, contact, scale, alpha);
+  drawContactSupports(ctx, contact, scale, alpha, ink);
   const [left, right] = contactEndpoints(contact);
-  ctx.strokeStyle = INK;
+  ctx.strokeStyle = ink;
   const linePixels =
     contact.style === 'ramp'
       ? 2.6
@@ -401,7 +447,7 @@ function drawBall(ctx: Ctx2D, actor: Actor, timeSec: number, scale: number): voi
 
     // The only impact accent is a physical compression seam attached to the
     // sampled ball and its real contact surface—never a detached baseline ring.
-    ctx.strokeStyle = INK;
+    ctx.strokeStyle = lineColorFor(actor.color);
     ctx.lineWidth = 1.2 / scale;
     ctx.globalAlpha = impact * 0.85;
     ctx.beginPath();
@@ -456,6 +502,7 @@ export function renderScene2D(ctx: Ctx2D, model: Scene2DModel, frame: RenderFram
   // future phrase as a visualizer trace.
   for (const actor of model.actors) {
     if (!isActorActive(actor, timeSec)) continue;
+    const ink = lineColorFor(actor.color);
     for (const segment of actor.segments) {
       if (segment.kind !== 'slide') continue;
       if (
@@ -471,7 +518,7 @@ export function renderScene2D(ctx: Ctx2D, model: Scene2DModel, frame: RenderFram
         Math.max(visible[0], clamp((timeSec - TRACK_BEHIND_SEC - segment.t0) / duration, 0, 1)),
         Math.min(visible[1], clamp((timeSec + TRACK_AHEAD_SEC - segment.t0) / duration, 0, 1)),
       ];
-      if (range[1] > range[0]) drawSlide(ctx, segment, range, scale);
+      if (range[1] > range[0]) drawSlide(ctx, segment, range, scale, ink);
     }
   }
 
@@ -479,13 +526,14 @@ export function renderScene2D(ctx: Ctx2D, model: Scene2DModel, frame: RenderFram
   // race. No event is filtered: every contact becomes visible at its own time.
   for (const actor of model.actors) {
     if (!isActorActive(actor, timeSec)) continue;
+    const ink = lineColorFor(actor.color);
     for (const contact of actor.contacts) {
       const alpha = temporalContactAlpha(contact, timeSec);
       if (alpha <= 0) continue;
       if (contact.surfacePoint.x < xMin - contact.lineLength || contact.surfacePoint.x > xMax + contact.lineLength) {
         continue;
       }
-      drawContact(ctx, contact, scale, alpha);
+      drawContact(ctx, contact, scale, alpha, ink);
     }
   }
 

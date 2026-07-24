@@ -12,7 +12,7 @@
 //   GET  /api/audio/:id     — stream the original audio for in-browser playback
 
 import { createServer } from 'node:http';
-import { existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -91,6 +91,10 @@ interface Job {
   inputPath: string;
   /** Original file extension (with dot), used to set the audio Content-Type. */
   inputExt: string;
+  /** Directory the analyzer writes per-stem audio (+ stems.json) into. */
+  stemsDir: string;
+  /** Playable separated stems (set on completion): name -> on-disk mp3 path. */
+  stems: Array<{ name: string; file: string }>;
   /** Full rich audio analysis (set on completion). */
   analysis?: AudioAnalysis;
   progress: ProgressEvent[];
@@ -106,6 +110,7 @@ interface Job {
 const PORT = parseInt(process.env.PORT ?? '3001', 10);
 const CLEANUP_TTL_MS = parseInt(process.env.CLEANUP_TTL_MS ?? String(30 * 60 * 1000), 10);
 const UPLOAD_DIR = join(tmpdir(), 'motionscore-uploads');
+const STEMS_DIR = join(tmpdir(), 'motionscore-stems');
 const AUDIO_CONTENT_TYPES: Record<string, string> = {
   '.mp3': 'audio/mpeg',
   '.wav': 'audio/wav',
@@ -113,7 +118,46 @@ const AUDIO_CONTENT_TYPES: Record<string, string> = {
   '.ogg': 'audio/ogg',
 };
 
+/** Friendly display labels for the playable Demucs stems. */
+const STEM_LABELS: Record<string, string> = {
+  drums: 'Drums',
+  bass: 'Bass',
+  vocals: 'Vocals',
+  guitar: 'Guitar',
+  piano: 'Piano',
+  other: 'Other / Melody',
+};
+
 mkdirSync(UPLOAD_DIR, { recursive: true });
+mkdirSync(STEMS_DIR, { recursive: true });
+
+/** Read the analyzer's stems.json manifest into absolute on-disk stem paths. */
+function readStemManifest(stemsDir: string): Array<{ name: string; file: string }> {
+  const manifestPath = join(stemsDir, 'stems.json');
+  if (!existsSync(manifestPath)) return [];
+  try {
+    const raw = JSON.parse(readFileSync(manifestPath, 'utf8')) as unknown;
+    if (!Array.isArray(raw)) return [];
+    const stems: Array<{ name: string; file: string }> = [];
+    for (const entry of raw) {
+      if (
+        entry &&
+        typeof entry === 'object' &&
+        typeof (entry as any).name === 'string' &&
+        typeof (entry as any).file === 'string'
+      ) {
+        const name = (entry as any).name as string;
+        // Guard against path traversal from the manifest filename.
+        const safe = name.replace(/[^a-z0-9_-]/gi, '');
+        const file = join(stemsDir, `${safe}.mp3`);
+        if (safe && existsSync(file)) stems.push({ name: safe, file });
+      }
+    }
+    return stems;
+  } catch {
+    return [];
+  }
+}
 
 // ---------------------------------------------------------------------------
 // In-memory job store
@@ -131,6 +175,11 @@ function scheduleCleanup(job: Job): void {
   setTimeout(() => {
     try {
       if (existsSync(job.inputPath)) rmSync(job.inputPath, { force: true });
+    } catch {
+      /* ignore cleanup errors */
+    }
+    try {
+      if (existsSync(job.stemsDir)) rmSync(job.stemsDir, { recursive: true, force: true });
     } catch {
       /* ignore cleanup errors */
     }
@@ -153,7 +202,7 @@ async function analyzeWithProgress(job: Job): Promise<AudioAnalysis> {
     return (originalWrite as any)(chunk, ...args);
   }) as typeof process.stderr.write;
   try {
-    return await analyzeAudio(job.inputPath);
+    return await analyzeAudio(job.inputPath, { stemsDir: job.stemsDir });
   } finally {
     process.stderr.write = originalWrite;
   }
@@ -197,6 +246,8 @@ app.post('/api/generate', upload.single('file'), async (req: Request, res: Respo
     status: 'pending',
     inputPath,
     inputExt: originalExt,
+    stemsDir: join(STEMS_DIR, jobId),
+    stems: [],
     progress: [],
     createdAt: Date.now(),
     listeners: new Set(),
@@ -220,6 +271,7 @@ app.post('/api/generate', upload.single('file'), async (req: Request, res: Respo
 
       const analysis = await analyzeWithProgress(job);
       job.analysis = analysis;
+      job.stems = readStemManifest(job.stemsDir);
       job.status = 'complete';
       emitToJob(job, {
         status: 'complete',
@@ -283,7 +335,32 @@ app.get('/api/result/:jobId', (req: Request, res: Response) => {
     durationSec: job.analysis?.durationSec ?? 0,
     audioUrl: `/api/audio/${jobId}`,
     analysis: job.analysis ?? null,
+    // Playable separated stems for the in-browser mixer (mute/solo). Only whole
+    // Demucs stems are separable; kick/snare/perc share the one drums stem.
+    stems: job.stems.map((s) => ({
+      id: s.name,
+      label: STEM_LABELS[s.name] ?? s.name,
+      url: `/api/stem/${jobId}/${s.name}`,
+    })),
   });
+});
+
+// GET /api/stem/:jobId/:name — stream one separated stem (mp3) for the mixer.
+app.get('/api/stem/:jobId/:name', (req: Request, res: Response) => {
+  const jobId = Array.isArray(req.params.jobId) ? req.params.jobId[0] : req.params.jobId;
+  const rawName = Array.isArray(req.params.name) ? req.params.name[0] : req.params.name;
+  const job = jobId ? jobs.get(jobId) : undefined;
+  if (!job) {
+    res.status(404).json({ error: 'Job not found' });
+    return;
+  }
+  const stem = job.stems.find((s) => s.name === rawName);
+  if (!stem || !existsSync(stem.file)) {
+    res.status(404).json({ error: 'Stem not found' });
+    return;
+  }
+  res.setHeader('Content-Type', 'audio/mpeg');
+  res.sendFile(stem.file);
 });
 
 // GET /api/audio/:jobId — stream the original uploaded audio (range-capable via

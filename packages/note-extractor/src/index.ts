@@ -32,7 +32,10 @@ export const AUDIO_EXTENSIONS: ReadonlySet<string> = new Set([
  * @throws {TranscriptionError} if the analyzer subprocess fails (Python/Demucs
  *   unavailable, non-zero exit, or invalid output).
  */
-export async function analyzeAudio(inputPath: string): Promise<AudioAnalysis> {
+export async function analyzeAudio(
+  inputPath: string,
+  options?: { stemsDir?: string },
+): Promise<AudioAnalysis> {
   const ext = extname(inputPath).toLowerCase();
   if (!AUDIO_EXTENSIONS.has(ext)) {
     throw new InputError(
@@ -41,7 +44,7 @@ export async function analyzeAudio(inputPath: string): Promise<AudioAnalysis> {
       { filePath: inputPath },
     );
   }
-  const analysis = await analyzeAudioEvents(inputPath);
+  const analysis = await analyzeAudioEvents(inputPath, options?.stemsDir);
   if (analysis.hits.length === 0) {
     throw new InputError(`No instrument onsets were detected in ${inputPath}.`, {
       filePath: inputPath,

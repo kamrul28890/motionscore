@@ -14,11 +14,12 @@ import type {
   RoleSignalTrack,
   SectionCue,
 } from '../renderTypes.js';
-import { type Scene2DSettings, type ActorGroupConfig, getActorOverride } from './settings.js';
+import { type Scene2DSettings, getActorOverride } from './settings.js';
 import type {
   Actor,
   ActorKind,
   BallisticSegment,
+  MergeSuggestion,
   RaceContact,
   RaceSegment,
   Scene2DModel,
@@ -44,6 +45,20 @@ const SUSTAIN_SWELL_LIFT = 4.5;
  * gravity is reduced so it never escapes to infinity.
  */
 const APEX_MAX_PITCHED = 10;
+
+/**
+ * A rest longer than this (for a pitched actor) is treated as a real silence:
+ * the ball leaves the screen entirely and re-enters on the next onset, instead
+ * of floating mid-screen. Below it, a gap stays a bounded arc (the liked
+ * fly-up-and-return). Also bounded by ~10 beats so it scales with tempo.
+ */
+const LONG_SILENCE_MIN_SEC = 6;
+/** Distance (world units) a dormant ball is pushed off-screen. */
+const OFFSCREEN_DIST = 55;
+/** Seconds the ball spends visibly leaving the frame / dropping back in. */
+const OFFSCREEN_TRANSIT_SEC = 0.9;
+/** Max world-unit drift a manual tilt may add, so it can't force a zoom-out. */
+const MAX_TILT_OFFSET = 6;
 const CONTACT_STACK_GAP = BALL_R * 2.8;
 const EXACT_TIME_EPSILON = 1e-6;
 const Q8 = 255;
@@ -139,6 +154,8 @@ interface ActorDraft {
   supportSpans: SupportSpan[];
   signal: GroupSignal;
   cues: readonly SectionCue[];
+  /** Long silences (contact pairs) where the ball flies off-screen and back. */
+  longGaps: Array<[from: RaceContact, to: RaceContact]>;
 }
 
 interface ContactReference {
@@ -450,6 +467,186 @@ function activeRange(
   return { startSec: start, endSec: end };
 }
 
+/** True if some contact sits inside `span` (within `margin` seconds of it). */
+function spanHasContact(
+  span: SupportSpan,
+  contacts: readonly RaceContact[],
+  margin: number,
+): boolean {
+  return contacts.some(
+    (c) => c.timeSec >= span.startSec - margin && c.timeSec <= span.endSec + margin,
+  );
+}
+
+/**
+ * Long silences for a pitched actor: gaps between consecutive contacts longer
+ * than the threshold with no genuine support in the middle. These become the
+ * "ball leaves the screen and re-enters" intervals. Bleed-only sustain (already
+ * dropped upstream) never counts as support here.
+ */
+function longSilenceGaps(
+  contacts: readonly RaceContact[],
+  supportSpans: readonly SupportSpan[],
+  beatSec: number,
+): Array<[RaceContact, RaceContact]> {
+  const threshold = Math.max(beatSec * 10, LONG_SILENCE_MIN_SEC);
+  const sorted = [...contacts].sort((a, b) => a.timeSec - b.timeSec);
+  const gaps: Array<[RaceContact, RaceContact]> = [];
+  for (let i = 0; i + 1 < sorted.length; i += 1) {
+    const a = sorted[i]!;
+    const b = sorted[i + 1]!;
+    if (b.timeSec - a.timeSec <= threshold) continue;
+    if (isSupported(supportSpans, a.timeSec + 0.01, b.timeSec - 0.01)) continue;
+    gaps.push([a, b]);
+  }
+  return gaps;
+}
+
+/**
+ * Merge support spans separated by only a brief gap. A short articulation dip in
+ * otherwise-continuous playing would otherwise split one rail into rail /
+ * ballistic hop / rail; if a low (or octave-misdetected) onset lands in that
+ * tiny gap right before the rail resumes, the ball darts down to it and snaps
+ * back up in a fraction of a beat. Bridging keeps continuous playing on one
+ * smooth rail (the per-onset pitch is then eased along it, not slammed).
+ */
+function mergeSupportSpans(spans: readonly SupportSpan[], bridgeSec: number): SupportSpan[] {
+  if (spans.length === 0) return [];
+  const sorted = [...spans].sort((a, b) => a.startSec - b.startSec);
+  const merged: SupportSpan[] = [{ ...sorted[0]! }];
+  for (let i = 1; i < sorted.length; i += 1) {
+    const last = merged[merged.length - 1]!;
+    const span = sorted[i]!;
+    if (span.startSec - last.endSec <= bridgeSec) {
+      last.endSec = Math.max(last.endSec, span.endSec);
+    } else {
+      merged.push({ ...span });
+    }
+  }
+  return merged;
+}
+
+/**
+ * Snap span boundaries onto a nearby contact so a rail begins/ends exactly on a
+ * real onset. Without this a boundary can land a few milliseconds from a
+ * contact, creating a degenerate sub-frame segment whose velocity blows up (the
+ * visible "fall off the line and snap back" glitch).
+ */
+function snapSpansToContacts(
+  spans: readonly SupportSpan[],
+  contacts: readonly RaceContact[],
+  window: number,
+): SupportSpan[] {
+  if (contacts.length === 0) return spans.map((s) => ({ ...s }));
+  const snap = (t: number): number => {
+    let best = t;
+    let bestDistance = window;
+    for (const contact of contacts) {
+      const distance = Math.abs(contact.timeSec - t);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = contact.timeSec;
+      }
+    }
+    return best;
+  };
+  return spans
+    .map((s) => ({ startSec: snap(s.startSec), endSec: snap(s.endSec) }))
+    .filter((s) => s.endSec > s.startSec);
+}
+
+/** Nominal half-height (world units) each actor kind sweeps around its lane. */
+function laneHalfHeight(kind: ActorKind): number {
+  if (kind === 'rhythm') return 1.4; // bounded hops
+  if (kind === 'bass') return 2.4; // heavier catches + some sustain
+  return 3.4; // lead: swell + arcs reach furthest
+}
+
+/**
+ * Auto-position the actors vertically so the scene reads less crowded: order
+ * balls by register (a high instrument sits above a low one) and allocate the
+ * gap between neighbours in proportion to how far each actually swings, all
+ * within roughly the current footprint. Returns a lane centre per actor index.
+ */
+export function computeLaneCenters(
+  entries: ReadonlyArray<{ kind: ActorKind; contacts: readonly RaceContact[] }>,
+): number[] {
+  const n = entries.length;
+  const centers = new Array<number>(n).fill(0);
+  if (n <= 1) return centers;
+
+  const half = entries.map((e) => laneHalfHeight(e.kind));
+  const register = entries.map((e) => medianPitch(e.contacts));
+  // High register first → most negative y (top of screen, since +y is down).
+  const order = [...entries.keys()].sort((a, b) => register[b]! - register[a]! || a - b);
+
+  const margin = BALL_R * 2;
+  const gaps: number[] = [];
+  for (let i = 0; i + 1 < n; i += 1) {
+    gaps.push(half[order[i]!]! + half[order[i + 1]!]! + margin);
+  }
+  const sum = gaps.reduce((s, g) => s + g, 0) || 1;
+  // Keep the total spread close to the old uniform layout (slightly roomier),
+  // so the camera zoom is unaffected while spacing is redistributed by amplitude.
+  const target = (n - 1) * GROUP_GAP * 1.15;
+  const scale = target / sum;
+
+  const byOrder = [0];
+  for (let i = 0; i < gaps.length; i += 1) byOrder.push(byOrder[i]! + gaps[i]! * scale);
+  const mean = byOrder.reduce((s, c) => s + c, 0) / n;
+  order.forEach((actorIndex, k) => {
+    centers[actorIndex] = byOrder[k]! - mean;
+  });
+  return centers;
+}
+
+/**
+ * Suggest merging two balls when their onsets nearly always coincide (within a
+ * small window): they would draw on top of each other, so one ball is clearer.
+ * Score = fraction of the sparser ball's onsets that have a partner in the
+ * other. Only confident, well-populated pairs are returned, strongest first.
+ */
+export function computeMergeSuggestions(actors: readonly Actor[], beatSec: number): MergeSuggestion[] {
+  const window = Math.min(0.08, beatSec * 0.2);
+  const minContacts = 12;
+  const minScore = 0.6;
+  const suggestions: MergeSuggestion[] = [];
+
+  for (let i = 0; i < actors.length; i += 1) {
+    for (let j = i + 1; j < actors.length; j += 1) {
+      const a = actors[i]!;
+      const b = actors[j]!;
+      const ta = a.hitTimes;
+      const tb = b.hitTimes;
+      if (ta.length < minContacts || tb.length < minContacts) continue;
+
+      // Count onsets of the SPARSER ball that have a partner within `window`.
+      const [few, many] = ta.length <= tb.length ? [ta, tb] : [tb, ta];
+      let matches = 0;
+      let p = 0;
+      for (let k = 0; k < few.length; k += 1) {
+        const t = few[k]!;
+        while (p < many.length - 1 && many[p]! < t - window) p += 1;
+        if (Math.abs(many[p]! - t) <= window) matches += 1;
+      }
+      const score = matches / few.length;
+      if (score < minScore) continue;
+      // Merge the sparser ball into the denser one (denser = primary identity).
+      const [primary, secondary] = a.contacts.length >= b.contacts.length ? [a, b] : [b, a];
+      suggestions.push({
+        aId: primary.id,
+        bId: secondary.id,
+        aLabel: primary.label,
+        bLabel: secondary.label,
+        score: Math.round(score * 100) / 100,
+      });
+    }
+  }
+
+  suggestions.sort((x, y) => y.score - x.score);
+  return suggestions.slice(0, 3);
+}
+
 function createAnchors(
   contacts: readonly RaceContact[],
   supportSpans: readonly SupportSpan[],
@@ -520,8 +717,7 @@ function createAnchors(
 
 function planPreliminaryAnchors(
   anchors: Anchor[],
-  actorIndex: number,
-  actorCount: number,
+  laneCenter: number,
   xBias: number,
   kind: ActorKind,
   contacts: readonly RaceContact[],
@@ -531,7 +727,7 @@ function planPreliminaryAnchors(
   beatSec: number,
   rapidThreshold: number,
 ): void {
-  const baseBand = (actorIndex - (actorCount - 1) / 2) * GROUP_GAP;
+  const baseBand = laneCenter;
   const pitchCenter = medianPitch(contacts);
   let depth = 0;
   let rapidRun = 0;
@@ -989,13 +1185,20 @@ function finishContactGeometry(draft: ActorDraft): void {
     const touchesSlide = incomingSegment?.kind === 'slide' || outgoingSegment?.kind === 'slide';
     const highFall =
       incomingSegment?.kind === 'ballistic' && Math.abs(incoming.y) > SCROLL_X * 1.75;
-    const style = touchesSlide
-      ? 'ramp'
-      : highFall
-        ? 'catch'
-        : contact.rapid
-          ? 'step'
-          : 'kicker';
+    // A very steep incoming ballistic is a re-entry dropping in from off-screen
+    // after a long silence; it should land in a catch cradle even when the note
+    // begins a sustained rail (which would otherwise read as a gentle ramp).
+    const steepReentry =
+      incomingSegment?.kind === 'ballistic' && Math.abs(incoming.y) > SCROLL_X * 4;
+    const style = steepReentry
+      ? 'catch'
+      : touchesSlide
+        ? 'ramp'
+        : highFall
+          ? 'catch'
+          : contact.rapid
+            ? 'step'
+            : 'kicker';
     contact.normal = normal;
     contact.tangent = tangent;
     contact.surfacePoint = {
@@ -1065,13 +1268,65 @@ function applyActorOverride(draft: ActorDraft, settings: Scene2DSettings): void 
   const override = getActorOverride(settings, draft.actor.id);
   if (override.yOffset === 0 && override.rotationDeg === 0) return;
 
-  const pivotX = draft.anchors[0]?.position.x ?? 0;
+  const anchors = draft.anchors;
+  // Pivot at the MIDDLE of the actor's x-range (symmetric tilt) and CLAMP the
+  // shear to +/-MAX_TILT_OFFSET. Without the clamp a tilted actor drifts
+  // linearly away from the pack over the whole song, forcing the camera to zoom
+  // out; clamped, the tilt is a bounded local lean that becomes a constant
+  // offset far from the pivot. x is left untouched (time->x mapping intact).
+  const firstX = anchors[0]?.position.x ?? 0;
+  const lastX = anchors[anchors.length - 1]?.position.x ?? firstX;
+  const pivotX = (firstX + lastX) / 2;
   const slope = Math.tan((override.rotationDeg * Math.PI) / 180);
 
-  for (const anchor of draft.anchors) {
-    anchor.position.y += override.yOffset + (anchor.position.x - pivotX) * slope;
+  for (const anchor of anchors) {
+    const shear = clamp((anchor.position.x - pivotX) * slope, -MAX_TILT_OFFSET, MAX_TILT_OFFSET);
+    anchor.position.y += override.yOffset + shear;
     if (anchor.contact !== null) anchor.contact.position = anchor.position;
   }
+}
+
+/**
+ * Insert off-screen exit/re-entry anchors for each long silence, so the ball
+ * flies off the screen when its instrument stops and drops back in on the next
+ * onset. The off-screen side is chosen from the re-entry note's pitch: a high
+ * note re-enters from the top, a low note from the bottom (same side is used
+ * for the exit so the ball never crosses the frame mid-silence). The steep
+ * re-entry arc makes the landing contact read as a `catch` cradle. The camera
+ * ignores the actor during `dormantIntervals`, so it never chases the flight.
+ */
+function applyLongGapExits(draft: ActorDraft): void {
+  if (draft.longGaps.length === 0) return;
+  const median = medianPitch(draft.actor.contacts);
+  const extra: Anchor[] = [];
+
+  for (const [from, to] of draft.longGaps) {
+    const fromAnchor = draft.anchorByContact.get(from);
+    const toAnchor = draft.anchorByContact.get(to);
+    if (!fromAnchor || !toAnchor) continue;
+    const gap = to.timeSec - from.timeSec;
+    const exitT = from.timeSec + OFFSCREEN_TRANSIT_SEC;
+    const enterT = to.timeSec - OFFSCREEN_TRANSIT_SEC;
+    if (enterT <= exitT) continue;
+    // -1 = leave/return via the top (high, loud re-entry), +1 = bottom (low).
+    const side = to.pitchMidi >= median ? -1 : 1;
+    const baseAt = (t: number): number =>
+      fromAnchor.position.y +
+      ((toAnchor.position.y - fromAnchor.position.y) * (t - from.timeSec)) / gap;
+    extra.push({
+      timeSec: exitT,
+      position: { x: exitT * SCROLL_X + draft.actor.xBias, y: baseAt(exitT) + side * OFFSCREEN_DIST },
+      contact: null,
+    });
+    extra.push({
+      timeSec: enterT,
+      position: { x: enterT * SCROLL_X + draft.actor.xBias, y: baseAt(enterT) + side * OFFSCREEN_DIST },
+      contact: null,
+    });
+  }
+
+  if (extra.length === 0) return;
+  draft.anchors = [...draft.anchors, ...extra].sort((a, b) => a.timeSec - b.timeSec);
 }
 
 /** Build the complete immutable race plan once per analysis/settings change. */
@@ -1087,6 +1342,7 @@ export function buildScene2D(
     bounds: { minY: -2, maxY: 2 },
     sourceHitCount: 0,
     representedHitCount: 0,
+    mergeSuggestions: [],
   };
   if (!analysis) return empty;
 
@@ -1116,22 +1372,51 @@ export function buildScene2D(
   }).filter((candidate) => candidate.notes.length > 0 || hasSignalActivity(candidate.signal));
   if (candidates.length === 0) return empty;
 
+  const supportMargin = Math.max(beatSec, 0.3);
   const prepared = candidates.map((candidate) => {
     const contacts = buildContacts(candidate.notes, candidate.definition.id, rapidThreshold);
-    const supportSpans = deriveSupportSpans(
+    const rawSpans = deriveSupportSpans(
       candidate.signal,
       candidate.definition.kind,
       analysis.sectionCues,
       durationSec,
       beatSec,
     );
-    return { ...candidate, contacts, supportSpans, range: activeRange(contacts, supportSpans) };
+    // Drop sustain spans that are pure separation bleed (no onset anywhere in
+    // them): a held vocal has onsets, guitar bleeding into the vocal stem does
+    // not — this kills the phantom rail during silences.
+    const anchoredSpans = rawSpans.filter((s) => spanHasContact(s, contacts, supportMargin));
+    // Bridge brief articulation gaps into one rail, then snap boundaries onto
+    // real onsets — together these prevent the sub-frame "snap" segment that a
+    // low/octave-misdetected onset next to a rail boundary would otherwise make.
+    const bridgedSpans = mergeSupportSpans(anchoredSpans, Math.min(0.3, beatSec * 0.75));
+    const cleanedSpans = snapSpansToContacts(bridgedSpans, contacts, 0.12);
+    // Long silences (the ball will leave the screen across these).
+    const longGaps = longSilenceGaps(contacts, cleanedSpans, beatSec);
+    // A support span overlapping a long silence is an artifact — remove it so
+    // the off-screen flight is clean and the re-entry lands on a bare catch.
+    const supportSpans = cleanedSpans.filter(
+      (s) => !longGaps.some(([a, b]) => s.startSec < b.timeSec && s.endSec > a.timeSec),
+    );
+    return {
+      ...candidate,
+      contacts,
+      supportSpans,
+      longGaps,
+      range: activeRange(contacts, supportSpans),
+    };
   }).filter((candidate): candidate is typeof candidate & { range: ActiveRange } => candidate.range !== null);
   if (prepared.length === 0) return empty;
 
+  // Auto vertical layout: order balls by register and space them by amplitude
+  // so the scene reads less crowded (replaces uniform lane spacing).
+  const laneCenters = computeLaneCenters(
+    prepared.map((c) => ({ kind: c.definition.kind, contacts: c.contacts })),
+  );
+
   const drafts: ActorDraft[] = [];
   prepared.forEach((candidate, actorIndex) => {
-    const { definition, notes, signal, contacts, supportSpans, range } = candidate;
+    const { definition, notes, signal, contacts, supportSpans, longGaps, range } = candidate;
     const xBias = (actorIndex - (prepared.length - 1) / 2) * RACE_X_GAP;
     const sourceRoles = definition.roles.filter(
       (role) =>
@@ -1148,8 +1433,7 @@ export function buildScene2D(
     );
     planPreliminaryAnchors(
       anchors,
-      actorIndex,
-      prepared.length,
+      laneCenters[actorIndex]!,
       xBias,
       definition.kind,
       contacts,
@@ -1171,8 +1455,17 @@ export function buildScene2D(
       hitTimes: Float64Array.from(contacts, (contact) => contact.timeSec),
       activeStartSec: range.startSec,
       activeEndSec: range.endSec,
+      dormantIntervals: longGaps.map(([a, b]) => ({ startSec: a.timeSec, endSec: b.timeSec })),
     };
-    drafts.push({ actor, anchors, anchorByContact, supportSpans, signal, cues: analysis.sectionCues });
+    drafts.push({
+      actor,
+      anchors,
+      anchorByContact,
+      supportSpans,
+      signal,
+      cues: analysis.sectionCues,
+      longGaps,
+    });
   });
 
   const convergences = clusterContacts(drafts, beatSec, analysis.sectionCues);
@@ -1182,6 +1475,7 @@ export function buildScene2D(
     // never re-introduce a sagging arc — the bounce invariant always wins.
     applyActorOverride(draft, settings);
     if (draft.actor.kind === 'rhythm') enforceRhythmHops(draft.anchors);
+    else applyLongGapExits(draft);
     draft.actor.segments = buildSegments(draft);
     finishContactGeometry(draft);
   }
@@ -1202,5 +1496,6 @@ export function buildScene2D(
     bounds: sceneBounds(actors),
     sourceHitCount,
     representedHitCount,
+    mergeSuggestions: computeMergeSuggestions(actors, beatSec),
   };
 }

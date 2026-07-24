@@ -80,9 +80,18 @@ export interface AudioAnalysis {
   roleSignals?: RoleSignals;
 }
 
+/** One separately-playable Demucs stem, for the in-browser mute/solo mixer. */
+export interface StemTrack {
+  id: string;
+  label: string;
+  url: string;
+}
+
 /** Response body of GET /api/result/:jobId. */
 export interface ResultPayload {
   durationSec: number;
   audioUrl: string;
   analysis: AudioAnalysis | null;
+  /** Present when the analyzer exported per-instrument stems (mixer feature). */
+  stems?: StemTrack[];
 }

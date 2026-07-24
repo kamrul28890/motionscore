@@ -4,6 +4,11 @@ node_modules/
 # Build output
 dist/
 *.tsbuildinfo
+# Stray TS emits that belong in dist/ (source is .ts/.tsx only)
+packages/web/src/**/*.js
+packages/web/src/**/*.d.ts
+# ...except this hand-authored ambient declaration (CSS side-effect imports)
+!packages/web/src/client/src/css.d.ts
 
 # Test / coverage artifacts
 coverage/
