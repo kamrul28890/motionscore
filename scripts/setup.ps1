@@ -27,7 +27,7 @@ if (Test-Path $venvDir) {
     }
 }
 
-$pythonExe = Join-Path $venvDir "Scripts" "python.exe"
+$pythonExe = Join-Path $venvDir "Scripts\python.exe"
 
 Write-Host "[setup] Upgrading pip ..." -ForegroundColor Cyan
 & $pythonExe -m pip install --upgrade pip

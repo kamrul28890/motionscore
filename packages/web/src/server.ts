@@ -29,6 +29,7 @@ import {
   AUDIO_EXTENSIONS,
 } from '@motionscore/note-extractor';
 import type { AudioAnalysis, AudioAnalysisSummary } from '@motionscore/types';
+import { parseAnalyzerProgressLine } from './analyzer-progress.js';
 
 // ---------------------------------------------------------------------------
 // Resolve the venv Python used for neural stems analysis (PyTorch + Demucs).
@@ -75,6 +76,7 @@ const PROJECT_ROOT = resolve(__serverDir, '..', '..', '..');
 // ---------------------------------------------------------------------------
 
 interface ProgressEvent {
+  stage?: string;
   message: string;
   percent?: number;
   status?: 'complete' | 'error';
@@ -168,7 +170,12 @@ const jobs = new Map<string, Job>();
 function emitToJob(job: Job, event: ProgressEvent): void {
   job.progress.push(event);
   const data = JSON.stringify(event);
-  for (const res of job.listeners) res.write(`data: ${data}\n\n`);
+  const terminal = event.status === 'complete' || event.status === 'error';
+  for (const res of job.listeners) {
+    res.write(`data: ${data}\n\n`);
+    if (terminal) res.end();
+  }
+  if (terminal) job.listeners.clear();
 }
 
 function scheduleCleanup(job: Job): void {
@@ -196,8 +203,21 @@ async function analyzeWithProgress(job: Job): Promise<AudioAnalysis> {
   const originalWrite = process.stderr.write.bind(process.stderr);
   process.stderr.write = ((chunk: any, ...args: any[]) => {
     const str = typeof chunk === 'string' ? chunk : chunk.toString();
-    if (str.includes('[motionscore]') || str.includes('separating')) {
-      emitToJob(job, { message: str.trim().replace(/^\[motionscore\]\s*/, ''), percent: 45 });
+    for (const rawLine of str.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      const structured = parseAnalyzerProgressLine(line);
+      if (structured) {
+        emitToJob(job, structured);
+      } else if (/separating on|CUDA failed/i.test(line)) {
+        emitToJob(job, {
+          stage: 'Source separation',
+          message: line.replace(/^\[motionscore\]\s*/, ''),
+          percent: 35,
+        });
+      } else if (line.includes('[motionscore]')) {
+        emitToJob(job, { message: line.replace(/^\[motionscore\]\s*/, '') });
+      }
     }
     return (originalWrite as any)(chunk, ...args);
   }) as typeof process.stderr.write;
@@ -258,11 +278,16 @@ app.post('/api/generate', upload.single('file'), async (req: Request, res: Respo
 
   setImmediate(async () => {
     job.status = 'running';
-    emitToJob(job, { message: 'Uploaded — preparing neural analysis', percent: 5 });
+    emitToJob(job, {
+      stage: 'Upload complete',
+      message: 'Uploaded — preparing neural analysis',
+      percent: 5,
+    });
 
     try {
       const hasGpu = await detectStemsGpuAvailable();
       emitToJob(job, {
+        stage: 'Hardware check',
         message: hasGpu
           ? 'GPU detected — separating instruments (neural)'
           : 'No GPU detected — separating on CPU (this can take a while)',
@@ -274,6 +299,7 @@ app.post('/api/generate', upload.single('file'), async (req: Request, res: Respo
       job.stems = readStemManifest(job.stemsDir);
       job.status = 'complete';
       emitToJob(job, {
+        stage: 'Complete',
         status: 'complete',
         message: 'Analysis complete',
         percent: 100,
@@ -284,7 +310,7 @@ app.post('/api/generate', upload.single('file'), async (req: Request, res: Respo
     } catch (err: any) {
       job.status = 'error';
       job.error = err?.message ?? 'Analysis failed';
-      emitToJob(job, { status: 'error', message: job.error! });
+      emitToJob(job, { stage: 'Failed', status: 'error', message: job.error! });
     }
 
     scheduleCleanup(job);
@@ -360,6 +386,10 @@ app.get('/api/stem/:jobId/:name', (req: Request, res: Response) => {
     return;
   }
   res.setHeader('Content-Type', 'audio/mpeg');
+  res.setHeader('Cache-Control', 'private, max-age=1800');
+  if (req.query['download'] === '1') {
+    res.setHeader('Content-Disposition', `attachment; filename="${stem.name}.mp3"`);
+  }
   res.sendFile(stem.file);
 });
 

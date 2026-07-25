@@ -2,7 +2,6 @@ import { useState, useCallback } from 'react';
 import { FileUpload } from './components/FileUpload.js';
 import { ConfigForm } from './components/ConfigForm.js';
 import { ProgressDisplay } from './components/ProgressDisplay.js';
-import { AnalysisPanel } from './components/AnalysisPanel.js';
 import { LiveScene } from './components/LiveScene.js';
 import { DEFAULT_SCENE_SETTINGS, type Scene2DSettings } from './scene2d/index.js';
 import type { ResultPayload } from './renderTypes.js';
@@ -183,11 +182,11 @@ export function App() {
               <LiveScene
                 result={result}
                 audioUrl={audioUrl}
+                analysisSummary={analysis}
                 settings={rideSettings}
                 onSettingsChange={setRideSettings}
                 onReset={handleReset}
               />
-              {analysis && <AnalysisPanel analysis={analysis} />}
             </>
           )}
 

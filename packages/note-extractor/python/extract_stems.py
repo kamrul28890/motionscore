@@ -103,6 +103,16 @@ ROLE_F0_HZ = {
 PYIN_HOP = ee.HOP_LENGTH * 4
 
 
+def _progress(percent: int, stage: str, message: str) -> None:
+    """Emit one machine-readable, line-buffered progress event for the web UI."""
+    payload = json.dumps(
+        {"percent": int(percent), "stage": stage, "message": message},
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    print(f"[motionscore] progress {payload}", file=sys.stderr, flush=True)
+
+
 def _signal_times(duration, np):
     """Canonical fixed-rate timeline shared with full-mix feature frames."""
     if duration <= 0.0:
@@ -583,6 +593,7 @@ def main() -> int:
     stems_dir = sys.argv[4] if len(sys.argv) > 4 else None
     warnings.filterwarnings("ignore")
 
+    _progress(16, "Environment", "Loading neural audio dependencies")
     import numpy as np
     import librosa
     import torch
@@ -590,12 +601,14 @@ def main() -> int:
     from demucs.pretrained import get_model
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    _progress(20, "Model loading", f"Loading {MODEL_NAME} on {device.upper()}")
     model = get_model(MODEL_NAME)
     model.eval()
     model_sr = model.samplerate
     sources = list(model.sources)
 
     # Load stereo at the model's sample rate for separation.
+    _progress(24, "Audio decoding", "Decoding and resampling the uploaded audio")
     wav, _ = librosa.load(audio_path, sr=model_sr, mono=False)
     if wav.ndim == 1:
         wav = np.stack([wav, wav])
@@ -614,6 +627,11 @@ def main() -> int:
     # determinism (same song -> same visualization) and speed matter — so it
     # stays off. Bump this (GPU only, per the docs) if you need cleaner *audio*.
     shifts = 0
+    _progress(
+        30,
+        "Source separation",
+        f"Separating the mix into {len(sources)} components on {device.upper()}",
+    )
     print(
         f"[motionscore] stems: separating on {device.upper()} "
         f"(model {MODEL_NAME}, shifts={shifts})",
@@ -650,13 +668,22 @@ def main() -> int:
     presence_floor = max(STEM_PRESENCE_ABS, STEM_PRESENCE_REL * loudest)
 
     events = []
-    active = []
+    active = [name for name in sources if stem_rms.get(name, 0.0) >= presence_floor]
+    _progress(
+        58,
+        "Stem detection",
+        f"Found {len(active)} active component{'s' if len(active) != 1 else ''}",
+    )
     analysis_stems = {}
     f0_by_role = {}
-    for name, mono in stem_mono.items():
-        if stem_rms[name] < presence_floor:
-            continue
-        active.append(name)
+    for index, name in enumerate(active):
+        mono = stem_mono[name]
+        analysis_percent = 60 + round(15 * index / max(1, len(active) - 1))
+        _progress(
+            analysis_percent,
+            "Instrument analysis",
+            f"Detecting onsets and pitch for {name}",
+        )
         mono_a = librosa.resample(mono, orig_sr=model_sr, target_sr=ANALYSIS_SR)
         analysis_stems[name] = mono_a
         if name == "drums":
@@ -676,14 +703,17 @@ def main() -> int:
 
     # Optional: write per-stem audio for the web mixer (mute/solo instruments).
     if stems_dir:
+        _progress(78, "Stem export", "Encoding individually playable components")
         try:
             _export_stems(stems_dir, stem_mono, active, model_sr, np)
         except Exception as err:  # noqa: BLE001 - stem export is best-effort
             print(f"[motionscore] stems: export failed ({err})", file=sys.stderr)
 
+    _progress(84, "Role signals", "Building activity, sustain, and pitch-direction timelines")
     role_signals = _build_role_signals(analysis_stems, f0_by_role, duration, np, librosa)
 
     # Continuous full-mix features + structural section cues.
+    _progress(90, "Song structure", "Measuring tempo, energy, and musical sections")
     y_full = librosa.to_mono(wav)
     y_a = librosa.resample(y_full, orig_sr=model_sr, target_sr=ANALYSIS_SR)
     arrays = ee._analyze_arrays(y_a, ANALYSIS_SR)
@@ -710,6 +740,7 @@ def main() -> int:
         "sectionCues": cues,
         "roleSignals": role_signals,
     }
+    _progress(96, "Result encoding", "Writing the validated analysis payload")
     with open(out_path, "w", encoding="utf-8") as output_file:
         json.dump(result, output_file, allow_nan=False, separators=(",", ":"))
 

@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { AudioAnalysisSummary } from '../App.js';
 import type { ResultPayload } from '../renderTypes.js';
+import { AnalysisPanel } from './AnalysisPanel.js';
 import { RideControls } from './RideControls.js';
 import { StemMixer } from './StemMixer.js';
 import {
@@ -15,6 +17,8 @@ interface LiveSceneProps {
   result: ResultPayload | null;
   /** URL of the original audio; this <audio> element is the master clock. */
   audioUrl: string;
+  /** Compact analysis used by the Source Lab charts and summaries. */
+  analysisSummary: AudioAnalysisSummary | null;
   settings: Scene2DSettings;
   onSettingsChange: (next: Scene2DSettings) => void;
   onReset: () => void;
@@ -29,6 +33,7 @@ interface LiveSceneProps {
 export function LiveScene({
   result,
   audioUrl,
+  analysisSummary,
   settings,
   onSettingsChange,
   onReset,
@@ -37,6 +42,7 @@ export function LiveScene({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const cameraRef = useRef(createCamera());
+  const [activeWorkspace, setActiveWorkspace] = useState<'source' | 'scene'>('source');
 
   const analysis = result?.analysis ?? null;
   const model = useMemo(() => buildScene2D(analysis, settings), [analysis, settings]);
@@ -150,17 +156,100 @@ export function LiveScene({
         )}
       </div>
 
-      <audio ref={audioRef} src={audioUrl} controls className="live-audio" />
+      <div className="timeline-transport">
+        <div className="timeline-transport-copy">
+          <span>Master timeline</span>
+          <small>Play, pause, or seek here—the scene and every component follow.</small>
+        </div>
+        <audio ref={audioRef} src={audioUrl} controls className="live-audio" />
+      </div>
 
-      {result?.stems && result.stems.length > 0 && (
-        <StemMixer masterRef={audioRef} stems={result.stems} />
-      )}
+      <section className="workspace">
+        <div className="workspace-tabs" role="tablist" aria-label="Visualization workspace">
+          <button
+            id="workspace-source-tab"
+            className={`workspace-tab${activeWorkspace === 'source' ? ' workspace-tab-active' : ''}`}
+            type="button"
+            role="tab"
+            aria-selected={activeWorkspace === 'source'}
+            aria-controls="workspace-source-panel"
+            onClick={() => setActiveWorkspace('source')}
+          >
+            <span className="workspace-tab-kicker">Listen &amp; inspect</span>
+            <span className="workspace-tab-title">Source Lab</span>
+            <span className="workspace-tab-meta">
+              {result?.stems?.length ?? 0} playable components
+            </span>
+          </button>
+          <button
+            id="workspace-scene-tab"
+            className={`workspace-tab${activeWorkspace === 'scene' ? ' workspace-tab-active' : ''}`}
+            type="button"
+            role="tab"
+            aria-selected={activeWorkspace === 'scene'}
+            aria-controls="workspace-scene-panel"
+            onClick={() => setActiveWorkspace('scene')}
+          >
+            <span className="workspace-tab-kicker">Shape the motion</span>
+            <span className="workspace-tab-title">Scene Controls</span>
+            <span className="workspace-tab-meta">
+              {model.actors.length} {model.actors.length === 1 ? 'active ball' : 'active balls'}
+            </span>
+          </button>
+        </div>
 
-      <RideControls
-        settings={settings}
-        onChange={onSettingsChange}
-        suggestions={model.mergeSuggestions}
-      />
+        <div
+          id="workspace-source-panel"
+          className="workspace-panel"
+          role="tabpanel"
+          aria-labelledby="workspace-source-tab"
+          hidden={activeWorkspace !== 'source'}
+        >
+          <div className="workspace-panel-intro">
+            <div>
+              <span className="workspace-panel-number">01</span>
+              <h3>Hear what the model found</h3>
+            </div>
+            <p>
+              Compare the original mix with its separated components, then inspect where
+              instruments, energy, and musical sections appear over time.
+            </p>
+          </div>
+
+          {result?.stems && result.stems.length > 0 ? (
+            <StemMixer masterRef={audioRef} stems={result.stems} analysis={analysis} />
+          ) : (
+            <div className="workspace-empty">
+              Playable components will appear here when separation finishes.
+            </div>
+          )}
+          {analysisSummary && <AnalysisPanel analysis={analysisSummary} />}
+        </div>
+
+        <div
+          id="workspace-scene-panel"
+          className="workspace-panel"
+          role="tabpanel"
+          aria-labelledby="workspace-scene-tab"
+          hidden={activeWorkspace !== 'scene'}
+        >
+          <div className="workspace-panel-intro">
+            <div>
+              <span className="workspace-panel-number">02</span>
+              <h3>Direct the choreography</h3>
+            </div>
+            <p>
+              Group sounds into balls, change their identity, and adjust each path while the
+              master timeline keeps the scene synchronized.
+            </p>
+          </div>
+          <RideControls
+            settings={settings}
+            onChange={onSettingsChange}
+            suggestions={model.mergeSuggestions}
+          />
+        </div>
+      </section>
     </div>
   );
 }

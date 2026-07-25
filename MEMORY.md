@@ -121,18 +121,26 @@ Calls `note-extractor` directly; there is no separate CLI/pipeline package.
 
 - `src/App.tsx` — upload -> generate -> SSE -> fetch result -> render.
 - `src/components/` — `FileUpload` (audio only), `ConfigForm` (just the Generate
-  button), `ProgressDisplay`, `AnalysisPanel` (role/energy/cue viz),
+  button), `ProgressDisplay` (named analyzer stages plus percent and messages),
+  `AnalysisPanel` (role/energy/cue viz),
   `LiveScene` (canvas + `<audio>` clock + rAF loop), `RideControls`
   (drag-and-drop ball grouping, per-ball height/tilt/show-hide, one-click
   "Merge" for suggested pairs from `model.mergeSuggestions`, and "Reset
   positions" to clear manual overrides back to the auto layout), and `StemMixer`
-  (mute/solo the separated instruments).
-- `src/components/StemMixer.tsx` — the in-browser mixer: renders one hidden
+  (source selection and individual component playback).
+- `src/components/StemMixer.tsx` — the in-browser component player: renders one hidden
   `<audio>` per `result.stems` entry, keeps them locked to the mix `<audio>`
   (the transport + visual clock) by mirroring play/pause/seek/rate and a 250 ms
-  drift correction, and mutes the mix while stems play so you hear their sum.
-  Mute/solo is per-element `.muted` (solo overrides mute). Falls back to the mix
-  if no stems. kick/snare/perc are not separable (one drums stem).
+  drift correction. The user can A/B the original mix and separated components,
+  listen to one stem, mute or solo stems, set independent volumes, and download
+  exported MP3s. Rows also show detected-hit and pitch-coverage diagnostics.
+  Falls back to the mix if no stems. kick/snare/perc are not separable (one
+  drums stem).
+- `src/components/LiveScene.tsx` keeps the visualization and master transport
+  visible, then divides the editing workspace into two accessible tabs:
+  **Source Lab** contains `StemMixer` plus `AnalysisPanel`; **Scene Controls**
+  contains `RideControls`. Both tab panels remain mounted so audio and editing
+  state survive tab changes.
 - `src/renderTypes.ts` — client-side mirror of the wire types (`AudioAnalysis`
   and its parts; `ResultPayload = { durationSec, audioUrl, analysis, stems? }`,
   `StemTrack`). Kept in sync with `@motionscore/types` by hand (the client is a

@@ -69,7 +69,13 @@ export function ProgressDisplay({ events }: ProgressDisplayProps) {
       <div className="progress-log" ref={logRef}>
         {events.map((event, i) => (
           <div key={i} className={`log-entry ${event.status === 'error' ? 'log-error' : ''}`}>
-            <span className="log-message">{event.message}</span>
+            <span className="log-percent">
+              {event.percent !== undefined ? `${event.percent}%` : '·'}
+            </span>
+            <span className="log-copy">
+              {event.stage && <strong>{event.stage}</strong>}
+              <span className="log-message">{event.message}</span>
+            </span>
           </div>
         ))}
       </div>
