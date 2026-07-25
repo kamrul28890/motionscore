@@ -29,7 +29,9 @@ import {
 const PYTHON_ENV_VAR = 'PYTHON';
 const DEFAULT_PYTHON = 'python';
 /** Neural per-instrument analyzer (Demucs `htdemucs_6s`). */
-const STEMS_SCRIPT_PATH = fileURLToPath(new URL('../python/extract_stems.py', import.meta.url));
+const STEMS_SCRIPT_PATH =
+  process.env.MOTIONSCORE_ANALYZER_SCRIPT?.trim() ||
+  fileURLToPath(new URL('../python/extract_stems.py', import.meta.url));
 const EVENT_DURATION_SEC = 0.12;
 const NOTE_ID_DIGITS = 4;
 /** Safety bound for a hung decoder/analyzer subprocess. */

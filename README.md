@@ -81,6 +81,29 @@ For a computer without an NVIDIA GPU:
 The first analysis downloads the approximately 170 MB `htdemucs_6s` model and
 caches it for later runs.
 
+## Windows desktop application
+
+MotionScore also includes an Electron desktop shell. It starts the local API on
+an available private port and opens the same Source Lab and Scene Controls
+experience in a dedicated Windows application window.
+
+```powershell
+# Run the desktop application from source
+npm run desktop:dev
+
+# Build an unpacked Windows application
+npm run desktop:dir
+
+# Build the Windows installer
+npm run desktop:build
+```
+
+Desktop artifacts are written to `desktop-dist/`. The unpacked development build
+automatically finds this repository's `.venv`; installers built on this machine
+also remember that existing runtime location. The installer intentionally does
+not embed the approximately 4.7 GB CUDA/Python environment, so a public release
+for other computers should add a first-run CPU/GPU runtime downloader.
+
 ## Development
 
 ```powershell
@@ -96,6 +119,7 @@ npm run web:build
 packages/types/           Shared analysis contracts and validation
 packages/note-extractor/  TypeScript wrapper and Python audio analyzer
 packages/web/             Express API and React/Vite application
+desktop/                  Electron Windows application shell
 scripts/                  Windows and Unix environment setup
 test/                     Pipeline and scene tests
 ```

@@ -2,7 +2,13 @@
   "name": "motionscore",
   "version": "0.1.0",
   "private": true,
-  "description": "Neural-stem music visualizer: audio -> live 2D physics scene (web)",
+  "description": "Neural-stem music visualizer: audio to a live 2D physics scene",
+  "author": "kamrul28890",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kamrul28890/motionscore.git"
+  },
+  "main": "desktop/main.mjs",
   "type": "module",
   "workspaces": [
     "packages/types",
@@ -17,11 +23,56 @@
     "test:watch": "vitest",
     "web:dev": "npm run dev -w @motionscore/web",
     "web:build": "npm run build -w @motionscore/web",
-    "web:start": "npm run start -w @motionscore/web"
+    "web:start": "npm run start -w @motionscore/web",
+    "desktop:prepare": "npm run web:build && node desktop/build-server.mjs",
+    "desktop:dev": "npm run desktop:prepare && electron .",
+    "desktop:dir": "npm run desktop:prepare && electron-builder --win dir",
+    "desktop:build": "npm run desktop:prepare && electron-builder --win nsis"
   },
   "devDependencies": {
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.1",
+    "fast-check": "4.9.0",
     "typescript": "7.0.2",
-    "vitest": "4.1.10",
-    "fast-check": "4.9.0"
+    "vitest": "4.1.10"
+  },
+  "build": {
+    "appId": "com.motionscore.desktop",
+    "productName": "MotionScore",
+    "asar": true,
+    "directories": {
+      "output": "desktop-dist"
+    },
+    "files": [
+      "desktop/main.mjs",
+      "desktop/generated/server.mjs",
+      "desktop/generated/runtime.json",
+      "packages/web/dist/client/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "packages/note-extractor/python",
+        "to": "analyzer"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "MotionScore"
+    }
   }
 }

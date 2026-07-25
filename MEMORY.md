@@ -117,6 +117,16 @@ Jobs live in memory and are cleaned up after `CLEANUP_TTL_MS` (30 min) along wit
 the input and stems dir. Resolves the venv Python at boot (auto-detects `.venv`).
 Calls `note-extractor` directly; there is no separate CLI/pipeline package.
 
+## Windows desktop shell (desktop/main.mjs)
+
+Electron starts the existing Express server on an ephemeral localhost port and
+loads it into one secure `BrowserWindow` (`contextIsolation`, sandbox, no Node
+integration). The shell locates the repository `.venv` for unpacked development
+builds and points packaged builds at an analyzer copied outside `app.asar`.
+`npm run desktop:dir` creates an unpacked Windows app; `npm run desktop:build`
+creates the NSIS installer. The multi-gigabyte PyTorch/CUDA runtime is not
+embedded and remains a separate distribution concern.
+
 ## Web client (packages/web/src/client)
 
 - `src/App.tsx` — upload -> generate -> SSE -> fetch result -> render.

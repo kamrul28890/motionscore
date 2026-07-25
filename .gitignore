@@ -3,6 +3,8 @@ node_modules/
 
 # Build output
 dist/
+desktop-dist/
+desktop/generated/
 *.tsbuildinfo
 # Stray TS emits that belong in dist/ (source is .ts/.tsx only)
 packages/web/src/**/*.js

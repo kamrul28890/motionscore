@@ -1703,6 +1703,38 @@ public hosting.
 
 ---
 
+# Windows desktop application
+
+The desktop edition reuses the same client, server, and Python analyzer instead
+of duplicating the product in another UI framework:
+
+```text
+MotionScore.exe (Electron main process)
+    ├── starts bundled Express server on 127.0.0.1:<available-port>
+    ├── opens one sandboxed BrowserWindow
+    │     └── canvas + Source Lab tab + Scene Controls tab
+    └── spawns the external Python analyzer for each job
+```
+
+`desktop/build-server.mjs` bundles the server and its JavaScript dependencies
+into one ESM file with esbuild. Electron Builder packages that server, the Vite
+client, and the external Python analysis scripts into:
+
+- `desktop-dist/win-unpacked/MotionScore.exe`
+- `desktop-dist/MotionScore Setup 0.1.0.exe`
+
+The application uses an ephemeral localhost port, disables Node integration in
+the page, enables context isolation and the Chromium sandbox, blocks navigation
+away from the local app, and opens approved HTTPS links in the system browser.
+
+The approximately 4.7 GB CUDA-enabled Python environment is not copied into the
+95 MB installer. Development builds locate the repository `.venv`; installers
+built on this computer remember that existing runtime path. A distributable
+release for unrelated computers still needs a first-run CPU/GPU runtime
+downloader, and a public release should be Authenticode-signed.
+
+---
+
 # Can MotionScore be hosted as a website?
 
 ## Short answer

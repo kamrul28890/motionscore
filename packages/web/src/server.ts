@@ -39,7 +39,9 @@ import { parseAnalyzerProgressLine } from './analyzer-progress.js';
 
 const __serverDir = fileURLToPath(new URL('.', import.meta.url));
 // Project root is three levels up from packages/web/src/ (or packages/web/dist/).
-const PROJECT_ROOT = resolve(__serverDir, '..', '..', '..');
+const PROJECT_ROOT = resolve(
+  process.env.MOTIONSCORE_PROJECT_ROOT?.trim() || resolve(__serverDir, '..', '..', '..'),
+);
 
 {
   const venvCandidates = [
@@ -414,7 +416,9 @@ app.get('/api/audio/:jobId', (req: Request, res: Response) => {
 // Serve the built client in production
 // ---------------------------------------------------------------------------
 
-const clientDistDir = join(__serverDir, 'client');
+const clientDistDir = resolve(
+  process.env.MOTIONSCORE_CLIENT_DIST?.trim() || join(__serverDir, 'client'),
+);
 if (existsSync(clientDistDir)) {
   app.use(express.static(clientDistDir));
   app.get('*', (_req, res) => {
@@ -428,7 +432,12 @@ if (existsSync(clientDistDir)) {
 
 const server = createServer(app);
 server.listen(PORT, () => {
-  console.log(`[motionscore-web] listening on http://localhost:${PORT}`);
+  const address = server.address();
+  const activePort =
+    address && typeof address !== 'string'
+      ? address.port
+      : PORT;
+  console.log(`[motionscore-web] listening on http://localhost:${activePort}`);
 });
 
 export { app, server };
