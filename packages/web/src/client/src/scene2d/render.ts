@@ -21,6 +21,7 @@ import type {
   SlideSegment,
   Vec2,
 } from './types.js';
+import type { HitRole, SectionCue } from '../renderTypes.js';
 
 const PAPER = '#f7f3e8';
 const INK = '#151515';
@@ -62,6 +63,14 @@ const CONTACT_TRAIL_SEC = 0.58;
 const TRACK_BEHIND_SEC = 0.48;
 const TRACK_AHEAD_SEC = 0.9;
 
+const SECTION_TINTS: Record<SectionCue['type'], string> = {
+  build: '#dce8ff',
+  rise: '#d8f5f2',
+  drop: '#ffe0e5',
+  breakdown: '#ebe8f5',
+  fall: '#e8e0f2',
+};
+
 const clamp = (value: number, low: number, high: number): number =>
   value < low ? low : value > high ? high : value;
 
@@ -74,6 +83,32 @@ const velocityScratch: Vec2 = { x: 0, y: 0 };
 function normalized(value: Vec2): Vec2 {
   const length = Math.hypot(value.x, value.y);
   return length > 1e-9 ? { x: value.x / length, y: value.y / length } : { x: 1, y: 0 };
+}
+
+function activeSection(model: Scene2DModel, timeSec: number): SectionCue | null {
+  let best: SectionCue | null = null;
+  for (const cue of model.sectionCues) {
+    if (timeSec < cue.startSec || timeSec > cue.endSec) continue;
+    if (!best || cue.intensity * cue.confidence > best.intensity * best.confidence) best = cue;
+  }
+  return best;
+}
+
+function mixHex(base: string, tint: string, amount: number): string {
+  const parse = (value: string): [number, number, number] => {
+    const number = Number.parseInt(value.slice(1), 16);
+    return [(number >> 16) & 255, (number >> 8) & 255, number & 255];
+  };
+  const a = parse(base);
+  const b = parse(tint);
+  const k = clamp(amount, 0, 1);
+  return `rgb(${Math.round(a[0] + (b[0] - a[0]) * k)}, ${Math.round(
+    a[1] + (b[1] - a[1]) * k,
+  )}, ${Math.round(a[2] + (b[2] - a[2]) * k)})`;
+}
+
+function actorMatchesRole(actor: Actor, role: HitRole | null | undefined): boolean {
+  return role == null || actor.sourceRoles.includes(role);
 }
 
 /** Support-side normal for a travelling ball; choose the visually lower side. */
@@ -193,13 +228,27 @@ function updateCamera(model: Scene2DModel, frame: RenderFrame): void {
   const spreadY = clamp(hiY - loY + BALL_R * 8, BALL_R * 10, maxSpreadY);
   const fitX = (width * (1 - 2 * CAMERA_MARGIN)) / spreadX;
   const fitY = (height * (1 - 2 * CAMERA_MARGIN)) / spreadY;
-  const targetScale = clamp(Math.min(fitX, fitY), 8, 220);
+  const cue = activeSection(model, timeSec);
+  const cueAmount = cue ? clamp(cue.intensity * cue.confidence, 0, 1) : 0;
+  const sectionZoom =
+    cue?.type === 'build' || cue?.type === 'rise'
+      ? 1 + cueAmount * 0.06
+      : cue?.type === 'breakdown'
+        ? 1 - cueAmount * 0.08
+        : 1;
+  const targetScale = clamp(Math.min(fitX, fitY) * sectionZoom, 8, 220);
   const visibleWorldWidth = width / targetScale;
   const targetX =
     currentCentroidX +
     (futureCentroidX - currentCentroidX) * 0.18 +
     visibleWorldWidth * (0.5 - BALL_LEFT_FRACTION);
-  const targetY = centerY;
+  const targetY =
+    centerY +
+    (cue?.type === 'rise' || cue?.type === 'build'
+      ? -cueAmount * 1.2
+      : cue?.type === 'fall'
+        ? cueAmount * 1.2
+        : 0);
 
   const seeked = Math.abs(dt) > 0.4 || !camera.inited || dt <= 0;
   if (seeked) {
@@ -208,9 +257,10 @@ function updateCamera(model: Scene2DModel, frame: RenderFrame): void {
     camera.scale = targetScale;
     camera.inited = true;
   } else {
-    camera.x = expLerp(camera.x, targetX, 5.2, dt);
-    camera.y = expLerp(camera.y, targetY, 4.2, dt);
-    camera.scale = expLerp(camera.scale, targetScale, 3.2, dt);
+    const motionFactor = frame.reducedMotion ? 0.42 : 1;
+    camera.x = expLerp(camera.x, targetX, 5.2 * motionFactor, dt);
+    camera.y = expLerp(camera.y, targetY, 4.2 * motionFactor, dt);
+    camera.scale = expLerp(camera.scale, targetScale, 3.2 * motionFactor, dt);
   }
 }
 
@@ -247,6 +297,7 @@ function drawSlideSupports(
   range: [number, number],
   scale: number,
   ink: string,
+  alpha: number,
 ): void {
   const dx = Math.abs(segment.p1.x - segment.p0.x) * (range[1] - range[0]);
   // Sparser, fainter struts read as ground hatching under the rail rather than
@@ -255,7 +306,7 @@ function drawSlideSupports(
   if (supportCount < 1) return;
   ctx.strokeStyle = ink;
   ctx.lineWidth = 0.9 / scale;
-  ctx.globalAlpha = 0.26;
+  ctx.globalAlpha = 0.26 * alpha;
   for (let index = 0; index < supportCount; index += 1) {
     const u = range[0] + ((range[1] - range[0]) * (index + 0.5)) / supportCount;
     const sample = slideTrackPoint(segment, u);
@@ -277,14 +328,28 @@ function drawSlide(
   range: [number, number],
   scale: number,
   ink: string,
+  alpha: number,
+  focused: boolean,
 ): void {
-  drawSlideSupports(ctx, segment, range, scale, ink);
+  drawSlideSupports(ctx, segment, range, scale, ink, alpha);
   const pixelLength =
     Math.abs(segment.p1.x - segment.p0.x) * (range[1] - range[0]) * scale;
   const steps = Math.max(4, Math.ceil(pixelLength / 7));
   ctx.strokeStyle = ink;
-  ctx.lineWidth = (3.1 + segment.activity * 1.3) / scale;
-  ctx.globalAlpha = 1;
+  if (segment.activity > 0.55 || focused) {
+    ctx.lineWidth = (7 + segment.activity * 5 + (focused ? 3 : 0)) / scale;
+    ctx.globalAlpha = alpha * (0.08 + segment.activity * 0.12);
+    ctx.beginPath();
+    for (let index = 0; index <= steps; index += 1) {
+      const u = range[0] + ((range[1] - range[0]) * index) / steps;
+      const sample = slideTrackPoint(segment, u).point;
+      if (index === 0) ctx.moveTo(sample.x, sample.y);
+      else ctx.lineTo(sample.x, sample.y);
+    }
+    ctx.stroke();
+  }
+  ctx.lineWidth = (3.1 + segment.activity * 1.8) / scale;
+  ctx.globalAlpha = alpha;
   ctx.beginPath();
   for (let index = 0; index <= steps; index += 1) {
     const u = range[0] + ((range[1] - range[0]) * index) / steps;
@@ -293,6 +358,7 @@ function drawSlide(
     else ctx.lineTo(sample.x, sample.y);
   }
   ctx.stroke();
+  ctx.globalAlpha = 1;
 }
 
 function contactEndpoints(contact: RaceContact): [Vec2, Vec2] {
@@ -403,11 +469,11 @@ function drawContact(
   ctx.globalAlpha = 1;
 }
 
-function temporalContactAlpha(contact: RaceContact, timeSec: number): number {
+function temporalContactAlpha(contact: RaceContact, timeSec: number, previewSec: number): number {
   const age = timeSec - contact.timeSec;
-  if (age < -CONTACT_PREVIEW_SEC || age > CONTACT_TRAIL_SEC) return 0;
+  if (age < -previewSec || age > CONTACT_TRAIL_SEC) return 0;
   if (age < 0) {
-    const reveal = 1 + age / CONTACT_PREVIEW_SEC;
+    const reveal = 1 + age / previewSec;
     return reveal * reveal;
   }
   const decay = 1 - age / CONTACT_TRAIL_SEC;
@@ -427,7 +493,15 @@ function latestContactIndex(actor: Actor, timeSec: number): number {
   return low;
 }
 
-function drawBall(ctx: Ctx2D, actor: Actor, timeSec: number, scale: number): void {
+function drawBall(
+  ctx: Ctx2D,
+  actor: Actor,
+  timeSec: number,
+  scale: number,
+  focused: boolean,
+  insight: boolean,
+  actorAlpha: number,
+): void {
   const position = sampleActor(actor, timeSec, pointScratch);
   const velocity = sampleActorVelocity(actor, timeSec, velocityScratch);
   const latest = latestContactIndex(actor, timeSec);
@@ -449,7 +523,7 @@ function drawBall(ctx: Ctx2D, actor: Actor, timeSec: number, scale: number): voi
     // sampled ball and its real contact surface—never a detached baseline ring.
     ctx.strokeStyle = lineColorFor(actor.color);
     ctx.lineWidth = 1.2 / scale;
-    ctx.globalAlpha = impact * 0.85;
+    ctx.globalAlpha = impact * 0.85 * actorAlpha;
     ctx.beginPath();
     ctx.moveTo(
       position.x + contact.normal.x * radiusY * 0.72,
@@ -457,16 +531,47 @@ function drawBall(ctx: Ctx2D, actor: Actor, timeSec: number, scale: number): voi
     );
     ctx.lineTo(contact.surfacePoint.x, contact.surfacePoint.y);
     ctx.stroke();
-    ctx.globalAlpha = 1;
+    ctx.globalAlpha = actorAlpha;
   }
 
   ctx.fillStyle = actor.color;
   ctx.strokeStyle = INK;
   ctx.lineWidth = 2.2 / scale;
+  ctx.globalAlpha = actorAlpha;
   ctx.beginPath();
   ctx.ellipse(position.x, position.y, radiusX, radiusY, angle, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
+
+  if (focused) {
+    ctx.strokeStyle = lineColorFor(actor.color);
+    ctx.lineWidth = 3 / scale;
+    ctx.globalAlpha = 0.5 * actorAlpha;
+    ctx.beginPath();
+    ctx.arc(position.x, position.y, BALL_R * 1.7, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = actorAlpha;
+  }
+
+  if (insight) {
+    const segment = actor.segments.find(
+      (candidate) => timeSec >= candidate.t0 && timeSec <= candidate.t1,
+    );
+    const direction =
+      segment?.kind === 'slide'
+        ? segment.pitchDirection > 0
+          ? ' ↑'
+          : segment.pitchDirection < 0
+            ? ' ↓'
+            : ' →'
+        : '';
+    ctx.fillStyle = INK;
+    ctx.font = `${12 / scale}px system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(`${actor.label}${direction}`, position.x, position.y - BALL_R * 1.55);
+  }
+  ctx.globalAlpha = 1;
 }
 
 export function renderScene2D(ctx: Ctx2D, model: Scene2DModel, frame: RenderFrame): void {
@@ -474,7 +579,11 @@ export function renderScene2D(ctx: Ctx2D, model: Scene2DModel, frame: RenderFram
   updateCamera(model, frame);
 
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.fillStyle = PAPER;
+  const cue = activeSection(model, timeSec);
+  const cueAmount = cue ? clamp(cue.intensity * cue.confidence, 0, 1) : 0;
+  ctx.fillStyle = cue
+    ? mixHex(PAPER, SECTION_TINTS[cue.type], 0.12 + cueAmount * 0.18)
+    : PAPER;
   ctx.globalAlpha = 1;
   ctx.fillRect(0, 0, width, height);
   if (model.actors.length === 0) return;
@@ -482,13 +591,24 @@ export function renderScene2D(ctx: Ctx2D, model: Scene2DModel, frame: RenderFram
   const scale = frame.camera.scale;
   const centerX = frame.camera.x;
   const centerY = frame.camera.y;
+  let shakeX = 0;
+  let shakeY = 0;
+  if (cue?.type === 'drop' && !frame.reducedMotion) {
+    const peak = cue.peakSec ?? (cue.startSec + cue.endSec) / 2;
+    const distance = Math.abs(timeSec - peak);
+    if (distance < 0.34) {
+      const envelope = 1 - distance / 0.34;
+      shakeX = Math.sin(timeSec * 83) * 4.5 * envelope * cueAmount;
+      shakeY = Math.cos(timeSec * 67) * 2.8 * envelope * cueAmount;
+    }
+  }
   ctx.setTransform(
     scale,
     0,
     0,
     scale,
-    width / 2 - centerX * scale,
-    height / 2 - centerY * scale,
+    width / 2 - centerX * scale + shakeX,
+    height / 2 - centerY * scale + shakeY,
   );
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
@@ -503,6 +623,8 @@ export function renderScene2D(ctx: Ctx2D, model: Scene2DModel, frame: RenderFram
   for (const actor of model.actors) {
     if (!isActorActive(actor, timeSec)) continue;
     const ink = lineColorFor(actor.color);
+    const matches = actorMatchesRole(actor, frame.focusedRole);
+    const actorAlpha = frame.focusedRole == null || matches ? 1 : 0.18;
     for (const segment of actor.segments) {
       if (segment.kind !== 'slide') continue;
       if (
@@ -518,7 +640,9 @@ export function renderScene2D(ctx: Ctx2D, model: Scene2DModel, frame: RenderFram
         Math.max(visible[0], clamp((timeSec - TRACK_BEHIND_SEC - segment.t0) / duration, 0, 1)),
         Math.min(visible[1], clamp((timeSec + TRACK_AHEAD_SEC - segment.t0) / duration, 0, 1)),
       ];
-      if (range[1] > range[0]) drawSlide(ctx, segment, range, scale, ink);
+      if (range[1] > range[0]) {
+        drawSlide(ctx, segment, range, scale, ink, actorAlpha, matches && frame.focusedRole != null);
+      }
     }
   }
 
@@ -527,8 +651,14 @@ export function renderScene2D(ctx: Ctx2D, model: Scene2DModel, frame: RenderFram
   for (const actor of model.actors) {
     if (!isActorActive(actor, timeSec)) continue;
     const ink = lineColorFor(actor.color);
+    const matches = actorMatchesRole(actor, frame.focusedRole);
+    const actorAlpha = frame.focusedRole == null || matches ? 1 : 0.16;
     for (const contact of actor.contacts) {
-      const alpha = temporalContactAlpha(contact, timeSec);
+      const previewSec = frame.mode === 'insight' ? 0.62 : CONTACT_PREVIEW_SEC;
+      const alpha =
+        temporalContactAlpha(contact, timeSec, previewSec) *
+        actorAlpha *
+        (0.42 + contact.confidence * 0.58);
       if (alpha <= 0) continue;
       if (contact.surfacePoint.x < xMin - contact.lineLength || contact.surfacePoint.x > xMax + contact.lineLength) {
         continue;
@@ -539,7 +669,18 @@ export function renderScene2D(ctx: Ctx2D, model: Scene2DModel, frame: RenderFram
 
   // Actors are last so their collision/squash remains legible over black track.
   for (const actor of model.actors) {
-    if (isActorActive(actor, timeSec)) drawBall(ctx, actor, timeSec, scale);
+    if (!isActorActive(actor, timeSec)) continue;
+    const matches = actorMatchesRole(actor, frame.focusedRole);
+    const actorAlpha = frame.focusedRole == null || matches ? 1 : 0.24;
+    drawBall(
+      ctx,
+      actor,
+      timeSec,
+      scale,
+      matches && frame.focusedRole != null,
+      frame.mode === 'insight',
+      actorAlpha,
+    );
   }
   ctx.globalAlpha = 1;
 }

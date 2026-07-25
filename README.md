@@ -31,6 +31,11 @@ redistributing the software.
 - Playable and downloadable stem components
 - Per-instrument onset, activity, sustain, and pitch analysis
 - Live canvas animation synchronized to the master audio timeline
+- Insight and Performance display modes with live actor states and pitch direction
+- Clickable full-song minimap with section bands, role activity, hits, and playhead
+- Section-aware scene direction for builds, rises, drops, breakdowns, and falls
+- Canvas/legend selection linked to the matching solo stem in Source Lab
+- Reduced-motion support and a live text description of the scene
 - One visual actor per detected role, with configurable grouping
 - Named progress stages from upload through result encoding
 - CUDA acceleration with automatic CPU fallback

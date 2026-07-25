@@ -234,8 +234,8 @@ export function AnalysisPanel({ analysis }: AnalysisPanelProps) {
             ))}
           </ul>
           <p className="analysis-note">
-            Section cues are detected but not yet animated. They will drive camera, environment,
-            and ball behavior in a later rendering pass.
+            These cues now direct the live scene: builds and rises lift and tighten the camera,
+            drops add a brief impact response, breakdowns widen the view, and falls descend.
           </p>
         </div>
       )}

@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
 import type { AudioAnalysisSummary } from '../App.js';
-import type { ResultPayload } from '../renderTypes.js';
+import type { HitRole, ResultPayload } from '../renderTypes.js';
 import { AnalysisPanel } from './AnalysisPanel.js';
 import { RideControls } from './RideControls.js';
+import { SceneLegend } from './SceneLegend.js';
+import { SongMinimap } from './SongMinimap.js';
 import { StemMixer } from './StemMixer.js';
 import {
   type Ctx2D,
@@ -10,7 +12,14 @@ import {
   buildScene2D,
   createCamera,
   renderScene2D,
+  sampleActor,
 } from '../scene2d/index.js';
+import {
+  describeScene,
+  rolesForStem,
+  sectionAt,
+  stemForRole,
+} from '../visualization-state.js';
 
 interface LiveSceneProps {
   /** Full analysis payload from /api/result (may arrive slightly after mount). */
@@ -43,10 +52,44 @@ export function LiveScene({
   const wrapRef = useRef<HTMLDivElement>(null);
   const cameraRef = useRef(createCamera());
   const [activeWorkspace, setActiveWorkspace] = useState<'source' | 'scene'>('source');
+  const [visualMode, setVisualMode] = useState<'performance' | 'insight'>('insight');
+  const [reducedMotion, setReducedMotion] = useState(
+    () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false,
+  );
+  const [currentTime, setCurrentTime] = useState(0);
+  const [selectedRole, setSelectedRole] = useState<HitRole | null>(null);
+  const [hoveredRole, setHoveredRole] = useState<HitRole | null>(null);
+  const [hoveredStem, setHoveredStem] = useState<string | null>(null);
+  const [soloStem, setSoloStem] = useState<string | null>(null);
+  const visualModeRef = useRef(visualMode);
+  const reducedMotionRef = useRef(reducedMotion);
+  const focusedRoleRef = useRef<HitRole | null>(null);
 
   const analysis = result?.analysis ?? null;
   const model = useMemo(() => buildScene2D(analysis, settings), [analysis, settings]);
   const modelRef = useRef(model);
+  const focusedRole =
+    hoveredRole ?? (hoveredStem ? (rolesForStem(hoveredStem)[0] ?? null) : selectedRole);
+  const focusedRoles = hoveredStem ? rolesForStem(hoveredStem) : focusedRole ? [focusedRole] : [];
+  const sceneRoles = model.actors
+    .flatMap((actor) => actor.sourceRoles)
+    .filter((role, index, roles) => roles.indexOf(role) === index);
+  const activeCue = analysis ? sectionAt(analysis.sectionCues, currentTime) : null;
+  const sceneDescription = analysis
+    ? describeScene(analysis, sceneRoles, currentTime)
+    : 'The analyzed scene is loading.';
+
+  useEffect(() => {
+    visualModeRef.current = visualMode;
+  }, [visualMode]);
+
+  useEffect(() => {
+    reducedMotionRef.current = reducedMotion;
+  }, [reducedMotion]);
+
+  useEffect(() => {
+    focusedRoleRef.current = focusedRole;
+  }, [focusedRole]);
 
   // Swap in a rebuilt model and reframe the camera when data/settings change.
   useEffect(() => {
@@ -75,6 +118,7 @@ export function LiveScene({
     let raf = 0;
     let lastWall = -1;
     let lastAudio = -1;
+    let lastUiTime = -1;
     const loop = (): void => {
       const audio = audioRef.current;
       const t = audio?.currentTime ?? 0;
@@ -86,12 +130,19 @@ export function LiveScene({
         cameraRef.current.inited = false; // seek/loop -> snap, don't slew
       }
       lastAudio = t;
+      if (Math.abs(t - lastUiTime) >= 0.08 || t === 0) {
+        lastUiTime = t;
+        setCurrentTime(t);
+      }
       renderScene2D(ctx, modelRef.current, {
         timeSec: t,
         dt,
         width: canvas.width,
         height: canvas.height,
         camera: cameraRef.current,
+        mode: visualModeRef.current,
+        focusedRole: focusedRoleRef.current,
+        reducedMotion: reducedMotionRef.current,
       });
       raf = requestAnimationFrame(loop);
     };
@@ -104,6 +155,43 @@ export function LiveScene({
   }, []);
 
   const showEmpty = result !== null && model.actors.length === 0;
+  const selectRole = (role: HitRole | null): void => {
+    setSelectedRole(role);
+    setHoveredRole(null);
+    if (!role) {
+      setSoloStem(null);
+      return;
+    }
+    const stem = stemForRole(role, result?.stems ?? []);
+    if (stem) setSoloStem(stem);
+  };
+  const seek = (timeSec: number): void => {
+    const audio = audioRef.current;
+    if (!audio || !analysis) return;
+    audio.currentTime = Math.min(analysis.durationSec, Math.max(0, timeSec));
+    setCurrentTime(audio.currentTime);
+    cameraRef.current.inited = false;
+  };
+  const clickCanvas = (event: MouseEvent<HTMLCanvasElement>): void => {
+    const canvas = canvasRef.current;
+    if (!canvas || model.actors.length === 0) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = ((event.clientX - rect.left) / Math.max(1, rect.width)) * canvas.width;
+    const y = ((event.clientY - rect.top) / Math.max(1, rect.height)) * canvas.height;
+    const camera = cameraRef.current;
+    let closest: { role: HitRole; distance: number } | null = null;
+    for (const actor of model.actors) {
+      if (actor.sourceRoles.length === 0) continue;
+      const point = sampleActor(actor, currentTime);
+      const screenX = canvas.width / 2 + (point.x - camera.x) * camera.scale;
+      const screenY = canvas.height / 2 + (point.y - camera.y) * camera.scale;
+      const distance = Math.hypot(screenX - x, screenY - y);
+      if (!closest || distance < closest.distance) {
+        closest = { role: actor.sourceRoles[0]!, distance };
+      }
+    }
+    selectRole(closest && closest.distance <= Math.max(24, camera.scale * 0.9) ? closest.role : null);
+  };
 
   return (
     <div className="card live-card">
@@ -111,6 +199,34 @@ export function LiveScene({
         <div className="live-title">
           <h2>Live visualization</h2>
           <span className="live-badge">2D physics &middot; solved from audio</span>
+        </div>
+        <div className="visual-display-controls" aria-label="Visualization display">
+          <div className="visual-mode-switch" role="group" aria-label="Scene detail mode">
+            <button
+              type="button"
+              aria-pressed={visualMode === 'performance'}
+              className={visualMode === 'performance' ? 'visual-mode-active' : ''}
+              onClick={() => setVisualMode('performance')}
+            >
+              Performance
+            </button>
+            <button
+              type="button"
+              aria-pressed={visualMode === 'insight'}
+              className={visualMode === 'insight' ? 'visual-mode-active' : ''}
+              onClick={() => setVisualMode('insight')}
+            >
+              Insight
+            </button>
+          </div>
+          <label className="motion-toggle">
+            <input
+              type="checkbox"
+              checked={reducedMotion}
+              onChange={(event) => setReducedMotion(event.target.checked)}
+            />
+            Reduced motion
+          </label>
         </div>
         <button className="btn btn-ghost live-reset" onClick={onReset} type="button">
           <span className="btn-icon" aria-hidden="true">
@@ -125,7 +241,31 @@ export function LiveScene({
 
       <div className="live-stage">
         <div className="live-canvas-wrap" ref={wrapRef}>
-          <canvas ref={canvasRef} className="live-canvas" />
+          <canvas
+            ref={canvasRef}
+            className="live-canvas"
+            role="img"
+            aria-label={sceneDescription}
+            onClick={clickCanvas}
+          >
+            {sceneDescription}
+          </canvas>
+          {analysis && visualMode === 'insight' && (
+            <SceneLegend
+              actors={model.actors}
+              analysis={analysis}
+              timeSec={currentTime}
+              selectedRole={selectedRole}
+              onSelectRole={selectRole}
+              onHoverRole={setHoveredRole}
+            />
+          )}
+          {activeCue && (
+            <div className={`section-indicator section-indicator-${activeCue.type}`}>
+              <b>{activeCue.type}</b>
+              <span>{Math.round(activeCue.intensity * 100)}% intensity</span>
+            </div>
+          )}
           {result === null && (
             <div className="live-overlay">
               <span className="live-spinner" aria-hidden="true" />
@@ -152,9 +292,27 @@ export function LiveScene({
             <span className="live-meta-item">
               <b>{analysis.durationSec.toFixed(1)}s</b> duration
             </span>
+            <span className="live-meta-sep" aria-hidden="true" />
+            <span className="live-meta-item">
+              Vertical <b>pitch</b> · horizontal <b>time</b> · rail glow <b>activity</b>
+            </span>
           </div>
         )}
       </div>
+
+      {analysis && (
+        <>
+          <SongMinimap
+            analysis={analysis}
+            roles={sceneRoles}
+            timeSec={currentTime}
+            onSeek={seek}
+          />
+          <p className="scene-description" aria-live="polite">
+            <b>Now:</b> {sceneDescription}
+          </p>
+        </>
+      )}
 
       <div className="timeline-transport">
         <div className="timeline-transport-copy">
@@ -217,7 +375,15 @@ export function LiveScene({
           </div>
 
           {result?.stems && result.stems.length > 0 ? (
-            <StemMixer masterRef={audioRef} stems={result.stems} analysis={analysis} />
+            <StemMixer
+              masterRef={audioRef}
+              stems={result.stems}
+              analysis={analysis}
+              soloStem={soloStem}
+              onSoloStemChange={setSoloStem}
+              focusedRoles={focusedRoles}
+              onStemFocus={setHoveredStem}
+            />
           ) : (
             <div className="workspace-empty">
               Playable components will appear here when separation finishes.

@@ -1665,11 +1665,50 @@ than a continuously evolving physics simulation.
 
 The renderer draws:
 
-1. paper-colored background
+1. a section-aware paper background
 2. sustained rails and visible track sections
 3. contact lines and catch bowls
 4. colored balls with dark outlines
 5. impact compression at onset time
+6. optional actor labels and pitch-direction arrows in Insight mode
+
+The display has two modes:
+
+- **Performance** keeps the canvas clean and emphasizes the choreography.
+- **Insight** adds the live instrument legend, state labels, pitch direction,
+  stronger selection feedback, and a longer preview of upcoming contacts.
+
+The full-song minimap below the canvas combines four synchronized layers:
+
+```text
+section color bands
+    + per-role activity lanes
+    + detected-hit dots
+    + current playhead
+```
+
+Clicking the map seeks the master audio and therefore seeks the scene and every
+stem. Clicking a legend item or a ball focuses its actor and solos the matching
+Demucs component in Source Lab. Hovering a stem performs the reverse connection
+and highlights its scene actor.
+
+The scene uses a consistent visual vocabulary:
+
+| Analysis value | Visual result |
+|---|---|
+| Time | horizontal motion and minimap position |
+| Pitch/register | vertical position; higher pitch is visually higher |
+| Continuous activity | rail thickness and glow |
+| Onset strength | contact size and impact compression |
+| Confidence | contact opacity/edge certainty |
+| Sustain | continuous supporting rail |
+| Silence | actor fades/exits and stops affecting the camera |
+| Section intensity | background tint and camera direction |
+
+Builds and rises lift and gently tighten the view. Drops create a brief,
+intensity-scaled camera response. Breakdowns widen and soften the view. Falls
+guide the camera downward. Reduced-motion mode removes drop shake and slows
+camera changes while preserving the information.
 
 The camera:
 
@@ -1872,6 +1911,12 @@ option.
 - Per-stem mute, solo, and volume controls
 - Per-stem MP3 downloads
 - Per-stem detected-hit and pitch-coverage summaries
+- Performance and Insight visualization modes
+- Live actor legend with HIT, RISING, FALLING, SUSTAIN, ACTIVE, and QUIET states
+- Clickable musical minimap with sections, activity, hits, and playhead
+- Section-aware backgrounds and camera behavior
+- Canvas/legend-to-stem solo and stem-to-scene highlighting
+- Reduced-motion mode and live text scene description
 
 The recommendations below remain useful follow-up work.
 

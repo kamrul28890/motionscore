@@ -14,6 +14,10 @@ interface StemMixerProps {
   masterRef: RefObject<HTMLAudioElement | null>;
   stems: StemTrack[];
   analysis: AudioAnalysis | null;
+  soloStem: string | null;
+  onSoloStemChange: (stemId: string | null) => void;
+  focusedRoles: readonly HitRole[];
+  onStemFocus: (stemId: string | null) => void;
 }
 
 type PlaybackSource = 'mix' | 'components';
@@ -63,13 +67,21 @@ function diagnosticsForStem(stemId: string, analysis: AudioAnalysis | null): Ste
  * visualization clock. Hidden stem elements mirror its play/pause/seek/rate,
  * while this panel switches audibly between the original and separated sources.
  */
-export function StemMixer({ masterRef, stems, analysis }: StemMixerProps) {
+export function StemMixer({
+  masterRef,
+  stems,
+  analysis,
+  soloStem,
+  onSoloStemChange,
+  focusedRoles,
+  onStemFocus,
+}: StemMixerProps) {
   const [source, setSource] = useState<PlaybackSource>('components');
   const [muted, setMuted] = useState<Record<string, boolean>>({});
-  const [solo, setSolo] = useState<string | null>(null);
   const [volumes, setVolumes] = useState<Record<string, number>>({});
   const [isPlaying, setIsPlaying] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const solo = soloStem;
 
   const stemEls = useCallback(
     (): HTMLAudioElement[] =>
@@ -169,6 +181,10 @@ export function StemMixer({ masterRef, stems, analysis }: StemMixerProps) {
     };
   }, [masterRef, muted, solo, source, stemEls, stems, volumes]);
 
+  useEffect(() => {
+    if (soloStem) setSource('components');
+  }, [soloStem]);
+
   const toggleMute = (id: string): void => {
     setSource('components');
     setMuted((current) => ({ ...current, [id]: !current[id] }));
@@ -176,7 +192,7 @@ export function StemMixer({ masterRef, stems, analysis }: StemMixerProps) {
 
   const toggleSolo = (id: string): void => {
     setSource('components');
-    setSolo((current) => (current === id ? null : id));
+    onSoloStemChange(solo === id ? null : id);
   };
 
   const listenToStem = (id: string): void => {
@@ -189,7 +205,7 @@ export function StemMixer({ masterRef, stems, analysis }: StemMixerProps) {
       else master.pause();
       return;
     }
-    setSolo(id);
+    onSoloStemChange(id);
     if (master.paused) void master.play().catch(() => {});
   };
 
@@ -253,6 +269,9 @@ export function StemMixer({ masterRef, stems, analysis }: StemMixerProps) {
           const volume = volumes[stem.id] ?? 1;
           const diagnostic = diagnostics[stem.id] ?? { hitCount: 0, pitchCoverage: null };
           const color = STEM_COLORS[stem.id] ?? '#4d84ff';
+          const focused = (STEM_ROLES[stem.id] ?? []).some((role) =>
+            focusedRoles.includes(role),
+          );
           const downloadUrl = `${stem.url}${stem.url.includes('?') ? '&' : '?'}download=1`;
 
           return (
@@ -260,7 +279,9 @@ export function StemMixer({ masterRef, stems, analysis }: StemMixerProps) {
               key={stem.id}
               className={`stem-row${componentMuted ? ' stem-row-muted' : ''}${
                 isSolo ? ' stem-row-solo' : ''
-              }`}
+              }${focused ? ' stem-row-focused' : ''}`}
+              onMouseEnter={() => onStemFocus(stem.id)}
+              onMouseLeave={() => onStemFocus(null)}
             >
               <div className="stem-identity">
                 <span className="stem-color" style={{ background: color }} aria-hidden="true" />

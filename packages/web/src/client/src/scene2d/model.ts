@@ -352,6 +352,7 @@ function buildContacts(notes: readonly NoteEvent[], actorId: string, rapidThresh
       }
       previous.pitchMidi = (previous.pitchMidi * oldCount + note.pitchMidi) / (oldCount + 1);
       previous.strength = Math.max(previous.strength, strength);
+      previous.confidence = Math.max(previous.confidence, clamp(note.confidence ?? 1, 0, 1));
       continue;
     }
     contacts.push({
@@ -360,6 +361,7 @@ function buildContacts(notes: readonly NoteEvent[], actorId: string, rapidThresh
       noteIds: [note.id],
       sourceRoles: note.role === undefined ? [] : [note.role],
       strength,
+      confidence: clamp(note.confidence ?? 1, 0, 1),
       pitchMidi: note.pitchMidi,
       rapid: false,
       intentionalConvergence: false,
@@ -1339,6 +1341,7 @@ export function buildScene2D(
     durationSec: 0,
     ballRadius: BALL_R,
     gravity: GRAVITY,
+    sectionCues: [],
     bounds: { minY: -2, maxY: 2 },
     sourceHitCount: 0,
     representedHitCount: 0,
@@ -1493,6 +1496,7 @@ export function buildScene2D(
     durationSec,
     ballRadius: BALL_R,
     gravity: GRAVITY,
+    sectionCues: analysis.sectionCues,
     bounds: sceneBounds(actors),
     sourceHitCount,
     representedHitCount,

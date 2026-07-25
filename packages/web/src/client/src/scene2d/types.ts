@@ -1,6 +1,6 @@
 // Framework-agnostic 2D race types shared by live canvas and snapshot/export code.
 
-import type { HitRole, PitchDirection } from '../renderTypes.js';
+import type { HitRole, PitchDirection, SectionCue } from '../renderTypes.js';
 
 export interface Ctx2D {
   save(): void;
@@ -61,6 +61,8 @@ export interface RaceContact {
   noteIds: string[];
   sourceRoles: HitRole[];
   strength: number;
+  /** Neural/event confidence, used as visual certainty (edge/opacity). */
+  confidence: number;
   pitchMidi: number;
   rapid: boolean;
   intentionalConvergence: boolean;
@@ -142,6 +144,8 @@ export interface Scene2DModel {
   durationSec: number;
   ballRadius: number;
   gravity: number;
+  /** Musical macro structure used for section-aware direction and annotation. */
+  sectionCues: SectionCue[];
   bounds: { minY: number; maxY: number };
   /** Regression invariant: all source hits are represented by contact noteIds. */
   sourceHitCount: number;
@@ -163,4 +167,7 @@ export interface RenderFrame {
   width: number;
   height: number;
   camera: CameraState;
+  mode?: 'performance' | 'insight';
+  focusedRole?: HitRole | null;
+  reducedMotion?: boolean;
 }

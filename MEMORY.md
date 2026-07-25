@@ -151,6 +151,13 @@ embedded and remains a separate distribution concern.
   **Source Lab** contains `StemMixer` plus `AnalysisPanel`; **Scene Controls**
   contains `RideControls`. Both tab panels remain mounted so audio and editing
   state survive tab changes.
+- The always-visible visualization surface also owns Performance/Insight mode,
+  reduced-motion preference, the live actor legend, a clickable full-song
+  minimap, accessible scene narration, canvas actor hit-testing, and shared
+  actor/stem focus. Selecting a ball or legend role solos its matching Demucs
+  component; hovering a stem highlights the corresponding scene actor.
+- `src/visualization-state.ts` contains the pure role-state, cue-selection,
+  scene-description, and role-to-stem mapping functions used by those controls.
 - `src/renderTypes.ts` — client-side mirror of the wire types (`AudioAnalysis`
   and its parts; `ResultPayload = { durationSec, audioUrl, analysis, stems? }`,
   `StemTrack`). Kept in sync with `@motionscore/types` by hand (the client is a
@@ -197,7 +204,8 @@ embedded and remains a separate distribution concern.
     snaps a rail boundary onto a nearby onset. Together these stop a low/octave-
     misdetected onset next to a rail boundary from making a degenerate sub-frame
     segment whose velocity blows up (the "fall off the line and snap back" glitch).
-- `render.ts` — `renderScene2D(ctx, model, frame)`: draws paper background, then
+- `render.ts` — `renderScene2D(ctx, model, frame)`: draws a section-aware paper
+  background, then
   physical rails/catch bowls/contact lines, then solid balls; a trimmed-
   percentile fit camera that follows the active pack. Deterministic in
   `frame.timeSec`. Lines are tinted per ball via `lineColorFor(actor.color)` —
