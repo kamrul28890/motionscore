@@ -1,8 +1,13 @@
 import type { AudioAnalysisSummary, SectionCue } from '../App.js';
+import type { StemTrack } from '../renderTypes.js';
 import { ROLE_COLORS, ROLE_LABELS, ROLE_ORDER } from '../roleMeta.js';
+import { stemForRole } from '../visualization-state.js';
 
 interface AnalysisPanelProps {
   analysis: AudioAnalysisSummary;
+  stems: StemTrack[];
+  enabledStemIds: readonly string[];
+  onStemEnabledChange: (stemId: string, enabled: boolean) => void;
 }
 
 /** Colors per structural cue type, ordered from high-energy to low-energy. */
@@ -43,7 +48,12 @@ function toPoints(
     .join(' ');
 }
 
-export function AnalysisPanel({ analysis }: AnalysisPanelProps) {
+export function AnalysisPanel({
+  analysis,
+  stems,
+  enabledStemIds,
+  onStemEnabledChange,
+}: AnalysisPanelProps) {
   const { durationSec, energyTimeline, sectionCues } = analysis;
   const activeRoles = ROLE_ORDER.filter((role) => analysis.roleCounts[role] > 0);
 
@@ -91,14 +101,42 @@ export function AnalysisPanel({ analysis }: AnalysisPanelProps) {
 
       {activeRoles.length > 0 && (
         <div className="analysis-block">
-          <h3 className="analysis-subtitle">Instruments over time</h3>
+          <div className="analysis-subtitle-row">
+            <h3 className="analysis-subtitle">Instruments over time</h3>
+            <span>Tick instruments to build a shared karaoke mix</span>
+          </div>
           <div className="role-activity">
             {activeRoles.map((role) => {
               const activity = analysis.roleActivity?.[role] ?? [];
               const color = ROLE_COLORS[role];
               const bins = Math.max(1, activity.length);
+              const stemId = stemForRole(role, stems);
+              const stem = stems.find((candidate) => candidate.id === stemId);
+              const included = stemId ? enabledStemIds.includes(stemId) : false;
               return (
                 <div key={role} className="role-activity-row">
+                  <label
+                    className="role-mix-check"
+                    title={
+                      stem
+                        ? `${included ? 'Remove' : 'Add'} ${stem.label} ${included ? 'from' : 'to'} the karaoke mix`
+                        : 'No separately playable component is available'
+                    }
+                  >
+                    <input
+                      type="checkbox"
+                      checked={included}
+                      disabled={!stemId}
+                      onChange={(event) => {
+                        if (stemId) onStemEnabledChange(stemId, event.target.checked);
+                      }}
+                    />
+                    <span className="sr-only">
+                      {stem
+                        ? `Include ${stem.label} in the karaoke mix`
+                        : `${ROLE_LABELS[role]} has no playable component`}
+                    </span>
+                  </label>
                   <span className="role-label" title={`${ROLE_LABELS[role]} — matches its ball color`}>
                     <i className="role-swatch" style={{ background: color }} />
                     {ROLE_LABELS[role]}

@@ -16,11 +16,15 @@ interface StemMixerProps {
   analysis: AudioAnalysis | null;
   soloStem: string | null;
   onSoloStemChange: (stemId: string | null) => void;
+  playbackSource: PlaybackSource;
+  onPlaybackSourceChange: (source: PlaybackSource) => void;
+  enabledStemIds: readonly string[];
+  onStemEnabledChange: (stemId: string, enabled: boolean) => void;
   focusedRoles: readonly HitRole[];
   onStemFocus: (stemId: string | null) => void;
 }
 
-type PlaybackSource = 'mix' | 'components';
+export type PlaybackSource = 'mix' | 'components';
 
 const STEM_ROLES: Record<string, readonly HitRole[]> = {
   drums: ['kick', 'snare', 'percussion'],
@@ -73,15 +77,18 @@ export function StemMixer({
   analysis,
   soloStem,
   onSoloStemChange,
+  playbackSource,
+  onPlaybackSourceChange,
+  enabledStemIds,
+  onStemEnabledChange,
   focusedRoles,
   onStemFocus,
 }: StemMixerProps) {
-  const [source, setSource] = useState<PlaybackSource>('components');
-  const [muted, setMuted] = useState<Record<string, boolean>>({});
   const [volumes, setVolumes] = useState<Record<string, number>>({});
   const [isPlaying, setIsPlaying] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const solo = soloStem;
+  const source = playbackSource;
 
   const stemEls = useCallback(
     (): HTMLAudioElement[] =>
@@ -171,7 +178,7 @@ export function StemMixer({
     for (const el of stemEls()) {
       const id = el.dataset.stem ?? '';
       const effectiveMuted =
-        source === 'mix' || (solo ? id !== solo : Boolean(muted[id]));
+        source === 'mix' || (solo ? id !== solo : !enabledStemIds.includes(id));
       el.muted = effectiveMuted;
       el.volume = volumes[id] ?? 1;
     }
@@ -179,27 +186,24 @@ export function StemMixer({
     return () => {
       master.removeEventListener('volumechange', applyMixState);
     };
-  }, [masterRef, muted, solo, source, stemEls, stems, volumes]);
-
-  useEffect(() => {
-    if (soloStem) setSource('components');
-  }, [soloStem]);
+  }, [enabledStemIds, masterRef, solo, source, stemEls, stems, volumes]);
 
   const toggleMute = (id: string): void => {
-    setSource('components');
-    setMuted((current) => ({ ...current, [id]: !current[id] }));
+    onPlaybackSourceChange('components');
+    onSoloStemChange(null);
+    onStemEnabledChange(id, !enabledStemIds.includes(id));
   };
 
   const toggleSolo = (id: string): void => {
-    setSource('components');
+    onPlaybackSourceChange('components');
     onSoloStemChange(solo === id ? null : id);
   };
 
   const listenToStem = (id: string): void => {
     const master = masterRef.current;
     if (!master) return;
-    setSource('components');
-    setMuted((current) => ({ ...current, [id]: false }));
+    onPlaybackSourceChange('components');
+    onStemEnabledChange(id, true);
     if (solo === id && source === 'components') {
       if (master.paused) void master.play().catch(() => {});
       else master.pause();
@@ -210,9 +214,9 @@ export function StemMixer({
   };
 
   const changeVolume = (id: string, value: number): void => {
-    setSource('components');
+    onPlaybackSourceChange('components');
     setVolumes((current) => ({ ...current, [id]: value }));
-    if (value > 0) setMuted((current) => ({ ...current, [id]: false }));
+    if (value > 0) onStemEnabledChange(id, true);
   };
 
   return (
@@ -234,7 +238,7 @@ export function StemMixer({
           <button
             type="button"
             className={source === 'mix' ? 'source-option source-option-active' : 'source-option'}
-            onClick={() => setSource('mix')}
+            onClick={() => onPlaybackSourceChange('mix')}
             aria-pressed={source === 'mix'}
           >
             Original mix
@@ -244,7 +248,7 @@ export function StemMixer({
             className={
               source === 'components' ? 'source-option source-option-active' : 'source-option'
             }
-            onClick={() => setSource('components')}
+            onClick={() => onPlaybackSourceChange('components')}
             aria-pressed={source === 'components'}
           >
             Components
@@ -258,12 +262,16 @@ export function StemMixer({
           ? 'Playing the untouched uploaded mix.'
           : solo
             ? `Listening only to ${stems.find((stem) => stem.id === solo)?.label ?? solo}.`
-            : 'Playing the sum of every enabled component.'}
+            : enabledStemIds.length === 0
+              ? 'No components selected. Tick instruments below to build a mix.'
+              : `Playing ${enabledStemIds.length} selected component${
+                  enabledStemIds.length === 1 ? '' : 's'
+                } together.`}
       </div>
 
       <div className="stem-list">
         {stems.map((stem) => {
-          const componentMuted = solo ? stem.id !== solo : Boolean(muted[stem.id]);
+          const componentMuted = solo ? stem.id !== solo : !enabledStemIds.includes(stem.id);
           const isSolo = solo === stem.id;
           const isListening = source === 'components' && isSolo && isPlaying;
           const volume = volumes[stem.id] ?? 1;
@@ -324,12 +332,16 @@ export function StemMixer({
                 <div className="stem-btns">
                   <button
                     type="button"
-                    className={`stem-btn${muted[stem.id] ? ' stem-btn-muted' : ''}`}
+                    className={`stem-btn${componentMuted && !solo ? ' stem-btn-muted' : ''}`}
                     onClick={() => toggleMute(stem.id)}
-                    aria-pressed={Boolean(muted[stem.id])}
-                    title={muted[stem.id] ? `Unmute ${stem.label}` : `Mute ${stem.label}`}
+                    aria-pressed={!enabledStemIds.includes(stem.id)}
+                    title={
+                      enabledStemIds.includes(stem.id)
+                        ? `Remove ${stem.label} from the mix`
+                        : `Add ${stem.label} to the mix`
+                    }
                   >
-                    {muted[stem.id] ? 'Muted' : 'Mute'}
+                    {enabledStemIds.includes(stem.id) ? 'Included' : 'Excluded'}
                   </button>
                   <button
                     type="button"

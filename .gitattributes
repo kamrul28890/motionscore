@@ -1,0 +1,6 @@
+# Preserve generated release bytes exactly and keep large/minified artifacts
+# out of textual diffs.
+desktop-dist/*.exe binary
+desktop-dist/*.blockmap binary
+desktop/generated/server.mjs binary
+packages/web/dist/** binary

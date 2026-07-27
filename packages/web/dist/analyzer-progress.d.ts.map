@@ -1,0 +1,1 @@
+{"version":3,"file":"analyzer-progress.d.ts","sourceRoot":"","sources":["../src/analyzer-progress.ts"],"names":[],"mappings":"AAAA,MAAM,WAAW,qBAAqB;IACpC,KAAK,EAAE,MAAM,CAAC;IACd,OAAO,EAAE,MAAM,CAAC;IAChB,OAAO,EAAE,MAAM,CAAC;CACjB;AAID;;;GAGG;AACH,wBAAgB,yBAAyB,CAAC,IAAI,EAAE,MAAM,GAAG,qBAAqB,GAAG,IAAI,CAyBpF"}

@@ -5,7 +5,7 @@ import { AnalysisPanel } from './AnalysisPanel.js';
 import { RideControls } from './RideControls.js';
 import { SceneLegend } from './SceneLegend.js';
 import { SongMinimap } from './SongMinimap.js';
-import { StemMixer } from './StemMixer.js';
+import { StemMixer, type PlaybackSource } from './StemMixer.js';
 import {
   type Ctx2D,
   type Scene2DSettings,
@@ -51,7 +51,7 @@ export function LiveScene({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const cameraRef = useRef(createCamera());
-  const [activeWorkspace, setActiveWorkspace] = useState<'source' | 'scene'>('source');
+  const [activeWorkspace, setActiveWorkspace] = useState<'live' | 'source' | 'scene'>('live');
   const [visualMode, setVisualMode] = useState<'performance' | 'insight'>('insight');
   const [reducedMotion, setReducedMotion] = useState(
     () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false,
@@ -61,6 +61,8 @@ export function LiveScene({
   const [hoveredRole, setHoveredRole] = useState<HitRole | null>(null);
   const [hoveredStem, setHoveredStem] = useState<string | null>(null);
   const [soloStem, setSoloStem] = useState<string | null>(null);
+  const [playbackSource, setPlaybackSource] = useState<PlaybackSource>('components');
+  const [enabledStemIds, setEnabledStemIds] = useState<string[]>([]);
   const visualModeRef = useRef(visualMode);
   const reducedMotionRef = useRef(reducedMotion);
   const focusedRoleRef = useRef<HitRole | null>(null);
@@ -90,6 +92,13 @@ export function LiveScene({
   useEffect(() => {
     focusedRoleRef.current = focusedRole;
   }, [focusedRole]);
+
+  const stemKey = (result?.stems ?? []).map((stem) => stem.id).join('|');
+  useEffect(() => {
+    setEnabledStemIds((result?.stems ?? []).map((stem) => stem.id));
+    setSoloStem(null);
+    setPlaybackSource('components');
+  }, [result?.audioUrl, stemKey]);
 
   // Swap in a rebuilt model and reframe the camera when data/settings change.
   useEffect(() => {
@@ -163,7 +172,21 @@ export function LiveScene({
       return;
     }
     const stem = stemForRole(role, result?.stems ?? []);
-    if (stem) setSoloStem(stem);
+    if (stem) {
+      setSoloStem(stem);
+      setPlaybackSource('components');
+    }
+  };
+  const setStemEnabled = (stemId: string, enabled: boolean): void => {
+    setEnabledStemIds((current) =>
+      enabled
+        ? current.includes(stemId)
+          ? current
+          : [...current, stemId]
+        : current.filter((id) => id !== stemId),
+    );
+    setSoloStem(null);
+    setPlaybackSource('components');
   };
   const seek = (timeSec: number): void => {
     const audio = audioRef.current;
@@ -196,11 +219,46 @@ export function LiveScene({
   return (
     <div className="card live-card">
       <div className="live-header">
-        <div className="live-title">
-          <h2>Live visualization</h2>
-          <span className="live-badge">2D physics &middot; solved from audio</span>
+        <div className="top-view-tabs" role="tablist" aria-label="MotionScore views">
+          <button
+            id="workspace-live-tab"
+            className={`top-view-tab${activeWorkspace === 'live' ? ' top-view-tab-active' : ''}`}
+            type="button"
+            role="tab"
+            aria-selected={activeWorkspace === 'live'}
+            aria-controls="workspace-live-panel"
+            onClick={() => setActiveWorkspace('live')}
+          >
+            <span>Live visualization</span>
+            <small>Watch the choreography</small>
+          </button>
+          <button
+            id="workspace-source-tab"
+            className={`top-view-tab${activeWorkspace === 'source' ? ' top-view-tab-active' : ''}`}
+            type="button"
+            role="tab"
+            aria-selected={activeWorkspace === 'source'}
+            aria-controls="workspace-source-panel"
+            onClick={() => setActiveWorkspace('source')}
+          >
+            <span>Source Lab</span>
+            <small>Listen &amp; inspect</small>
+          </button>
+          <button
+            id="workspace-scene-tab"
+            className={`top-view-tab${activeWorkspace === 'scene' ? ' top-view-tab-active' : ''}`}
+            type="button"
+            role="tab"
+            aria-selected={activeWorkspace === 'scene'}
+            aria-controls="workspace-scene-panel"
+            onClick={() => setActiveWorkspace('scene')}
+          >
+            <span>Scene Controls</span>
+            <small>Shape the motion</small>
+          </button>
         </div>
-        <div className="visual-display-controls" aria-label="Visualization display">
+        {activeWorkspace === 'live' && (
+          <div className="visual-display-controls" aria-label="Visualization display">
           <div className="visual-mode-switch" role="group" aria-label="Scene detail mode">
             <button
               type="button"
@@ -227,7 +285,8 @@ export function LiveScene({
             />
             Reduced motion
           </label>
-        </div>
+          </div>
+        )}
         <button className="btn btn-ghost live-reset" onClick={onReset} type="button">
           <span className="btn-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -239,6 +298,21 @@ export function LiveScene({
         </button>
       </div>
 
+      <div className="timeline-transport">
+        <div className="timeline-transport-copy">
+          <span>Master timeline</span>
+          <small>Play, pause, or seek here—the scene and every selected component follow.</small>
+        </div>
+        <audio ref={audioRef} src={audioUrl} controls className="live-audio" />
+      </div>
+
+      <div
+        id="workspace-live-panel"
+        className="primary-view-panel live-view-panel"
+        role="tabpanel"
+        aria-labelledby="workspace-live-tab"
+        hidden={activeWorkspace !== 'live'}
+      >
       <div className="live-stage">
         <div className="live-canvas-wrap" ref={wrapRef}>
           <canvas
@@ -313,49 +387,9 @@ export function LiveScene({
           </p>
         </>
       )}
-
-      <div className="timeline-transport">
-        <div className="timeline-transport-copy">
-          <span>Master timeline</span>
-          <small>Play, pause, or seek here—the scene and every component follow.</small>
-        </div>
-        <audio ref={audioRef} src={audioUrl} controls className="live-audio" />
       </div>
 
       <section className="workspace">
-        <div className="workspace-tabs" role="tablist" aria-label="Visualization workspace">
-          <button
-            id="workspace-source-tab"
-            className={`workspace-tab${activeWorkspace === 'source' ? ' workspace-tab-active' : ''}`}
-            type="button"
-            role="tab"
-            aria-selected={activeWorkspace === 'source'}
-            aria-controls="workspace-source-panel"
-            onClick={() => setActiveWorkspace('source')}
-          >
-            <span className="workspace-tab-kicker">Listen &amp; inspect</span>
-            <span className="workspace-tab-title">Source Lab</span>
-            <span className="workspace-tab-meta">
-              {result?.stems?.length ?? 0} playable components
-            </span>
-          </button>
-          <button
-            id="workspace-scene-tab"
-            className={`workspace-tab${activeWorkspace === 'scene' ? ' workspace-tab-active' : ''}`}
-            type="button"
-            role="tab"
-            aria-selected={activeWorkspace === 'scene'}
-            aria-controls="workspace-scene-panel"
-            onClick={() => setActiveWorkspace('scene')}
-          >
-            <span className="workspace-tab-kicker">Shape the motion</span>
-            <span className="workspace-tab-title">Scene Controls</span>
-            <span className="workspace-tab-meta">
-              {model.actors.length} {model.actors.length === 1 ? 'active ball' : 'active balls'}
-            </span>
-          </button>
-        </div>
-
         <div
           id="workspace-source-panel"
           className="workspace-panel"
@@ -381,6 +415,10 @@ export function LiveScene({
               analysis={analysis}
               soloStem={soloStem}
               onSoloStemChange={setSoloStem}
+              playbackSource={playbackSource}
+              onPlaybackSourceChange={setPlaybackSource}
+              enabledStemIds={enabledStemIds}
+              onStemEnabledChange={setStemEnabled}
               focusedRoles={focusedRoles}
               onStemFocus={setHoveredStem}
             />
@@ -389,7 +427,14 @@ export function LiveScene({
               Playable components will appear here when separation finishes.
             </div>
           )}
-          {analysisSummary && <AnalysisPanel analysis={analysisSummary} />}
+          {analysisSummary && (
+            <AnalysisPanel
+              analysis={analysisSummary}
+              stems={result?.stems ?? []}
+              enabledStemIds={enabledStemIds}
+              onStemEnabledChange={setStemEnabled}
+            />
+          )}
         </div>
 
         <div

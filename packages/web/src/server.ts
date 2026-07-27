@@ -30,6 +30,11 @@ import {
 } from '@motionscore/note-extractor';
 import type { AudioAnalysis, AudioAnalysisSummary } from '@motionscore/types';
 import { parseAnalyzerProgressLine } from './analyzer-progress.js';
+import {
+  RuntimeManager,
+  type RuntimeMode,
+  type RuntimeProgress,
+} from './runtime-manager.js';
 
 // ---------------------------------------------------------------------------
 // Resolve the venv Python used for neural stems analysis (PyTorch + Demucs).
@@ -121,6 +126,7 @@ const AUDIO_CONTENT_TYPES: Record<string, string> = {
   '.flac': 'audio/flac',
   '.ogg': 'audio/ogg',
 };
+const runtimeManager = new RuntimeManager(PROJECT_ROOT);
 
 /** Friendly display labels for the playable Demucs stems. */
 const STEM_LABELS: Record<string, string> = {
@@ -251,10 +257,81 @@ const upload = multer({
   },
 });
 
+// GET /api/runtime/status — verify that the analysis runtime is usable.
+app.get('/api/runtime/status', async (_req: Request, res: Response) => {
+  try {
+    res.json(await runtimeManager.inspect());
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    res.status(500).json({ error: message });
+  }
+});
+
+// POST /api/runtime/install — start a private first-run CPU/GPU installation.
+app.post('/api/runtime/install', async (req: Request, res: Response) => {
+  const mode = req.body?.mode as RuntimeMode | undefined;
+  if (mode !== 'cpu' && mode !== 'cuda') {
+    res.status(400).json({ error: 'Runtime mode must be "cpu" or "cuda".' });
+    return;
+  }
+  const status = await runtimeManager.inspect();
+  if (status.state === 'installing') {
+    res.status(409).json({ error: 'Runtime installation is already in progress.' });
+    return;
+  }
+  if (mode === 'cuda' && !status.nvidiaAvailable) {
+    res.status(400).json({
+      error: 'No NVIDIA driver was detected. Choose the CPU runtime instead.',
+    });
+    return;
+  }
+  const installation = runtimeManager.install(mode);
+  res.status(202).json({
+    accepted: true,
+    mode,
+    progressUrl: '/api/runtime/progress',
+  });
+  void installation.catch((cause) => {
+    console.error('[motionscore-runtime] installation failed', cause);
+  });
+});
+
+// GET /api/runtime/progress — replay and stream first-run installation progress.
+app.get('/api/runtime/progress', (_req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  const writeEvent = (event: RuntimeProgress): void => {
+    res.write(`data: ${JSON.stringify(event)}\n\n`);
+    if (event.status === 'complete' || event.status === 'error') res.end();
+  };
+  for (const event of runtimeManager.progress) writeEvent(event);
+  const latest = runtimeManager.progress.at(-1);
+  if (latest?.status === 'complete' || latest?.status === 'error') return;
+  const unsubscribe = runtimeManager.subscribe(writeEvent);
+  res.on('close', unsubscribe);
+});
+
 // POST /api/generate — upload an audio file and start analysis.
 app.post('/api/generate', upload.single('file'), async (req: Request, res: Response) => {
   if (!req.file) {
     res.status(400).json({ error: 'No file uploaded' });
+    return;
+  }
+  const runtime = await runtimeManager.inspect();
+  if (!runtime.ready) {
+    try {
+      rmSync(req.file.path, { force: true });
+    } catch {
+      /* ignore upload cleanup */
+    }
+    res.status(503).json({
+      error: 'The MotionScore analysis runtime is not ready. Complete first-run setup.',
+      runtime,
+    });
     return;
   }
 
