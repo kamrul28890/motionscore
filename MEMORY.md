@@ -105,9 +105,24 @@ Role order/colours/labels live in the same file (`ROLE_ORDER`, `ROLE_COLORS`,
   feature-frame sampling, section-cue detection, peak picking, normalization.
   It has no standalone entry point (the old librosa modes were removed).
 
+## Managed first-run runtime (packages/web/src/runtime-manager.ts)
+
+- `RuntimeManager` checks Python, PyTorch, Demucs, librosa, FFmpeg, CUDA, and
+  the per-user runtime directory before uploads are enabled.
+- On Windows, first-run setup downloads signed CPython, verifies the Python
+  Software Foundation signature, installs a private Python without changing the
+  system PATH, installs pinned CPU or CUDA dependencies, copies a private
+  FFmpeg executable, caches `htdemucs_6s`, and verifies imports.
+- Runtime API: `/api/runtime/status`, `/api/runtime/install`, and the
+  `/api/runtime/progress` SSE stream. `/api/generate` returns 503 until the
+  runtime passes verification.
+- Electron sets `MOTIONSCORE_RUNTIME_ROOT` to its per-user application-data
+  folder. Source development still prefers the repository `.venv`.
+
 ## Web server (packages/web/src/server.ts)
 
-Audio-only, stems-only. Endpoints: `/api/generate`, `/api/progress/:id` (SSE),
+Audio-only, stems-only. Endpoints: runtime status/install/progress,
+`/api/generate`, `/api/progress/:id` (SSE),
 `/api/result/:id` (`{ durationSec, audioUrl, analysis, stems }`), `/api/audio/:id`,
 `/api/stem/:id/:name` (one separated-instrument mp3 for the mixer). Each job gets
 a `stemsDir` (under the OS temp dir) passed to `analyzeAudio(path, { stemsDir })`;
@@ -123,15 +138,19 @@ Electron starts the existing Express server on an ephemeral localhost port and
 loads it into one secure `BrowserWindow` (`contextIsolation`, sandbox, no Node
 integration). The shell locates the repository `.venv` for unpacked development
 builds and points packaged builds at an analyzer copied outside `app.asar`.
+Packaged builds prefer the managed per-user runtime and open first-run setup
+when it is absent.
 `npm run desktop:dir` creates an unpacked Windows app; `npm run desktop:build`
-creates the NSIS installer. The multi-gigabyte PyTorch/CUDA runtime is not
-embedded and remains a separate distribution concern.
+creates the NSIS installer. The multi-gigabyte PyTorch/CUDA runtime is downloaded
+on demand instead of being embedded.
 
 ## Web client (packages/web/src/client)
 
-- `src/App.tsx` — upload -> generate -> SSE -> fetch result -> render.
+- `src/App.tsx` — runtime check/setup gate -> upload -> generate -> SSE -> fetch
+  result -> render.
 - `src/components/` — `FileUpload` (audio only), `ConfigForm` (just the Generate
-  button), `ProgressDisplay` (named analyzer stages plus percent and messages),
+  button), `RuntimeSetup` (CPU/GPU first-run install and SSE progress),
+  `ProgressDisplay` (named analyzer stages plus percent and messages),
   `AnalysisPanel` (role/energy/cue viz),
   `LiveScene` (canvas + `<audio>` clock + rAF loop), `RideControls`
   (drag-and-drop ball grouping, per-ball height/tilt/show-hide, one-click
@@ -146,11 +165,15 @@ embedded and remains a separate distribution concern.
   exported MP3s. Rows also show detected-hit and pitch-coverage diagnostics.
   Falls back to the mix if no stems. kick/snare/perc are not separable (one
   drums stem).
-- `src/components/LiveScene.tsx` keeps the visualization and master transport
-  visible, then divides the editing workspace into two accessible tabs:
-  **Source Lab** contains `StemMixer` plus `AnalysisPanel`; **Scene Controls**
-  contains `RideControls`. Both tab panels remain mounted so audio and editing
-  state survive tab changes.
+- `src/components/LiveScene.tsx` exposes three accessible top-level tabs:
+  **Live visualization**, **Source Lab**, and **Scene Controls**. The master
+  transport stays mounted above every tab so playback and seek state survive
+  view changes. Source Lab contains `StemMixer` plus `AnalysisPanel`; Scene
+  Controls contains `RideControls`.
+- The instrument-activity rows include checkboxes backed by shared
+  `enabledStemIds` state. They build a multi-component karaoke mix and stay in
+  sync with the include/exclude controls in `StemMixer`; the three drum roles
+  intentionally share the single Demucs drums component.
 - The always-visible visualization surface also owns Performance/Insight mode,
   reduced-motion preference, the live actor legend, a clickable full-song
   minimap, accessible scene narration, canvas actor hit-testing, and shared

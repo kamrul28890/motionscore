@@ -46,6 +46,8 @@ function readBuildPythonFallback() {
 
 function configureAnalyzerEnvironment() {
   const packagedRoot = process.resourcesPath;
+  const managedRuntimeRoot = join(app.getPath('userData'), 'runtime');
+  const managedPython = join(managedRuntimeRoot, 'python', 'python.exe');
   const analyzerScript = app.isPackaged
     ? join(packagedRoot, 'analyzer', 'extract_stems.py')
     : join(sourceRoot, 'packages', 'note-extractor', 'python', 'extract_stems.py');
@@ -53,15 +55,19 @@ function configureAnalyzerEnvironment() {
   process.env.PORT = '0';
   process.env.MOTIONSCORE_PROJECT_ROOT = app.isPackaged ? packagedRoot : sourceRoot;
   process.env.MOTIONSCORE_ANALYZER_SCRIPT = analyzerScript;
+  process.env.MOTIONSCORE_RUNTIME_ROOT = managedRuntimeRoot;
   process.env.MOTIONSCORE_CLIENT_DIST = app.isPackaged
     ? join(app.getAppPath(), 'packages', 'web', 'dist', 'client')
     : join(sourceRoot, 'packages', 'web', 'dist', 'client');
 
   if (!process.env.PYTHON) {
     const bundledPython = join(packagedRoot, 'python', 'Scripts', 'python.exe');
+    const projectPython = findProjectVenv(app.isPackaged ? packagedRoot : sourceRoot);
     const discoveredPython =
       (existsSync(bundledPython) ? bundledPython : undefined) ??
-      findProjectVenv(app.isPackaged ? packagedRoot : sourceRoot) ??
+      (app.isPackaged ? undefined : projectPython) ??
+      (existsSync(managedPython) ? managedPython : undefined) ??
+      projectPython ??
       readBuildPythonFallback();
     if (discoveredPython) process.env.PYTHON = discoveredPython;
   }

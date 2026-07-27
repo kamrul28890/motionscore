@@ -1766,11 +1766,34 @@ The application uses an ephemeral localhost port, disables Node integration in
 the page, enables context isolation and the Chromium sandbox, blocks navigation
 away from the local app, and opens approved HTTPS links in the system browser.
 
-The approximately 4.7 GB CUDA-enabled Python environment is not copied into the
-95 MB installer. Development builds locate the repository `.venv`; installers
-built on this computer remember that existing runtime path. A distributable
-release for unrelated computers still needs a first-run CPU/GPU runtime
-downloader, and a public release should be Authenticode-signed.
+The large Python environment is not copied into the application installer.
+Instead, the web client checks `/api/runtime/status` on startup. When the
+analysis engine is missing, a first-run screen offers CPU or NVIDIA CUDA setup:
+
+```text
+First launch
+    → inspect Python, PyTorch, Demucs, librosa, and FFmpeg
+    → detect NVIDIA driver
+    → user selects CPU or GPU
+    → download signed Python installer
+    → verify Python Software Foundation signature
+    → install private Python under the per-user app-data folder
+    → install pinned PyTorch, torchaudio, Demucs, and librosa
+    → install/copy a private FFmpeg executable
+    → download and cache htdemucs_6s
+    → verify imports and enable the normal upload screen
+```
+
+`packages/web/src/runtime-manager.ts` owns detection, installation, environment
+activation, and progress events. The runtime API exposes status, installation,
+and an SSE progress stream. `/api/generate` rejects uploads with a clear 503
+response until verification succeeds.
+
+Development builds continue to use the repository `.venv` when it is healthy.
+Packaged builds prefer a managed runtime under Electron's per-user data
+directory. The downloader needs internet access and several gigabytes of disk
+space but does not require administrator access or modify the system `PATH`.
+A public release should still be Authenticode-signed.
 
 ---
 

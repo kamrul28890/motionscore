@@ -1,41 +1,72 @@
-# Dependencies
+# Dependencies and package-manager caches
 node_modules/
+.npm/
 
-# Build output
+# Local configuration, credentials, and signing material
+.env
+.env.*
+!.env.example
+*.local
+*.key
+*.pem
+*.pfx
+*.p12
+
+# Python environments, caches, and bytecode
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Generated TypeScript output. Selected release builds are re-included below.
 dist/
-desktop-dist/
 desktop/generated/
 *.tsbuildinfo
-# Stray TS emits that belong in dist/ (source is .ts/.tsx only)
+
+# Publish the compiled server, but never its machine-specific runtime.json.
+!desktop/generated/
+desktop/generated/*
+!desktop/generated/server.mjs
+
+# Publish the production web build.
+!packages/web/dist/
+!packages/web/dist/**
+
+# Publish only the distributable Windows release files. win-unpacked contains a
+# 225+ MB executable that exceeds GitHub's normal per-file limit and is
+# reproducible with `npm run desktop:dir`.
+desktop-dist/*
+!desktop-dist/latest.yml
+!desktop-dist/MotionScore Setup 0.1.0.exe.blockmap
+!desktop-dist/SHA256SUMS.txt
+
+# Stray TypeScript emits beside source files
 packages/web/src/**/*.js
 packages/web/src/**/*.d.ts
-# ...except this hand-authored ambient declaration (CSS side-effect imports)
 !packages/web/src/client/src/css.d.ts
 
-# Test / coverage artifacts
+# Test and coverage output
 coverage/
 
-# Runtime + scratch artifacts
+# Runtime, uploads, generated stems, and scratch files
 tmp/
 .tmp*/
 *.log
+npm-debug.log*
 .stems-seg-test.json
-
-# Python virtual environment / bytecode
-.venv/
-__pycache__/
-*.py[cod]
-
-# Environment
-.env
-
-# Local-only working docs and IDE/agent config (not part of the public repo)
-.kiro/
-docs/
-
-# Sample audio (local test asset)
 music/
 
-# Editor / OS
+# IDE, agent, and OS configuration
+.vscode/
+.idea/
+.kiro/
+docs/
+*.user
+*.suo
 .DS_Store
 Thumbs.db
+Desktop.ini

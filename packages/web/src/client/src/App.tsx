@@ -1,10 +1,12 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { FileUpload } from './components/FileUpload.js';
 import { ConfigForm } from './components/ConfigForm.js';
 import { ProgressDisplay } from './components/ProgressDisplay.js';
 import { LiveScene } from './components/LiveScene.js';
+import { RuntimeSetup } from './components/RuntimeSetup.js';
 import { DEFAULT_SCENE_SETTINGS, type Scene2DSettings } from './scene2d/index.js';
 import type { ResultPayload } from './renderTypes.js';
+import type { RuntimeStatus } from './runtimeTypes.js';
 
 export type AppState = 'idle' | 'uploading' | 'generating' | 'complete' | 'error';
 
@@ -64,6 +66,33 @@ export function App() {
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [rideSettings, setRideSettings] = useState<Scene2DSettings>(DEFAULT_SCENE_SETTINGS);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
+  const [runtimeStatusError, setRuntimeStatusError] = useState<string | null>(null);
+
+  const refreshRuntime = useCallback(async () => {
+    setRuntimeStatusError(null);
+    try {
+      const response = await fetch('/api/runtime/status');
+      const payload = (await response.json().catch(() => null)) as
+        | RuntimeStatus
+        | { error?: string }
+        | null;
+      if (!response.ok) {
+        throw new Error(
+          payload && 'error' in payload && payload.error
+            ? payload.error
+            : `Runtime check failed (${response.status})`,
+        );
+      }
+      setRuntimeStatus(payload as RuntimeStatus);
+    } catch (cause) {
+      setRuntimeStatusError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshRuntime();
+  }, [refreshRuntime]);
 
   const handleGenerate = useCallback(async () => {
     if (!file) return;
@@ -168,6 +197,33 @@ export function App() {
         </div>
       </header>
 
+      {runtimeStatus === null ? (
+        <main className="runtime-shell">
+          <section className="runtime-loading card" aria-live="polite">
+            {runtimeStatusError ? (
+              <>
+                <h2>Runtime check failed</h2>
+                <p>{runtimeStatusError}</p>
+                <button className="btn btn-primary" type="button" onClick={() => void refreshRuntime()}>
+                  Check again
+                </button>
+              </>
+            ) : (
+              <>
+                <span className="runtime-loader" aria-hidden="true" />
+                <h2>Checking the analysis runtime</h2>
+                <p>Verifying Python, PyTorch, Demucs, librosa, and FFmpeg.</p>
+              </>
+            )}
+          </section>
+        </main>
+      ) : !runtimeStatus.ready ? (
+        <RuntimeSetup
+          status={runtimeStatus}
+          onStatusChange={setRuntimeStatus}
+          onReady={setRuntimeStatus}
+        />
+      ) : (
       <main className="app-main">
         <aside className="panel-left">
           <FileUpload file={file} onFileSelect={setFile} disabled={busy} />
@@ -237,6 +293,7 @@ export function App() {
           )}
         </section>
       </main>
+      )}
     </div>
   );
 }
